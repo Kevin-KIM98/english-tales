@@ -1,0 +1,21 @@
+# PR을 올리거나 main에 머지하면 자동으로 검사합니다.
+# Render는 이 검사가 통과한 커밋만 배포합니다 (render.yaml 의 autoDeployTrigger: checksPass).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test

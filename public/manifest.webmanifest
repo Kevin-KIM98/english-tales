@@ -1,0 +1,15 @@
+{
+  "name": "English Tales — 이야기로 배우는 영어",
+  "short_name": "English Tales",
+  "description": "유튜브 이야기 채널의 자막으로 문장 발음·해석·단어를 공부합니다.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5efe3",
+  "theme_color": "#c7661f",
+  "lang": "ko",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

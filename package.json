@@ -1,0 +1,23 @@
+{
+  "name": "english-tales",
+  "version": "1.0.0",
+  "description": "유튜브 채널 자막에서 영어 문장·해석·단어를 추출하는 학습 앱 (휴대폰·PC 공용 PWA)",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "pc": "node --env-file-if-exists=.env server/index.js --open",
+    "dev": "node --watch --env-file-if-exists=.env server/index.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "check": "node --check server/index.js && node --check public/app.js && node --check public/sw.js"
+  },
+  "engines": {
+    "node": ">=22.9"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "cmu-pronouncing-dictionary": "^3.0.0",
+    "msedge-tts": "^2.0.7",
+    "subtlex-word-frequencies": "^2.0.0"
+  }
+}
