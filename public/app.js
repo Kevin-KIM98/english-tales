@@ -1,5 +1,12 @@
-// English Tales — 유튜브 이야기 채널 자막으로 공부하는 학습 앱 (휴대폰·PC 공용)
-import { mergeState } from './merge.js';
+// English Tales — 유튜브 이야기 채널 자막으로 공부하는 안드로이드 학습 앱
+// 서버 없이 휴대폰 안에서 채널 목록·자막·해석·단어를 모두 처리한다.
+import { getChannel, getMoreVideos } from './lib/youtube.js';
+import { buildLesson, getLesson, deleteLesson, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
+import { define } from './lib/enrich.js';
+import { createTTS } from './lib/tts.js';
+import { db } from './lib/db.js';
+import { checkUpdate, openDownload, appInfo } from './lib/update.js';
+import { isNative } from './lib/net.js';
 
 const DEFAULT_CHANNEL = 'https://www.youtube.com/@ZylosTales';
 const $view = document.getElementById('view');
@@ -23,25 +30,21 @@ const store = {
 };
 
 const settings = Object.assign(
-  { channel: DEFAULT_CHANNEL, voice: '', rate: 0.95, showKo: true, theme: 'auto', repeat: 1, gap: 0.8, loopAll: false, recentChannels: [] },
+  { channel: DEFAULT_CHANNEL, voice: '', rate: 0.95, showKo: true, theme: 'auto', repeat: 1, gap: 0.8, loopAll: false, autoPrepare: true, recentChannels: [] },
   store.get('settings', {}),
 );
 const saveSettings = () => store.set('settings', settings);
-// 아래 기록은 서버를 통해 PC·휴대폰이 함께 쓴다. 항목마다 t(수정 시각)를 붙여 병합한다.
+// 학습 기록은 이 휴대폰에 저장된다
 const progress = store.get('progress', {}); // videoId → { titleKo, total, learned: [], quiz, lastTab, t }
 const words = store.get('words', {}); // word → { ...vocab, videoId, addedAt, known, t } | { deleted: true, t }
 const days = new Set(store.get('days', []));
-let daysT = store.get('daysT', 0);
 
-/** 이야기 진행률 저장. id를 주면 그 이야기를 방금 바뀐 것으로 표시해 다른 기기에 전파한다. */
 function saveProgress(id) {
   if (id && progress[id]) progress[id].t = Date.now();
   store.set('progress', progress);
-  if (id) sync.push();
 }
 function saveWords() {
   store.set('words', words);
-  sync.push();
 }
 const hasWord = (w) => Boolean(words[w] && !words[w].deleted);
 const wordList = () => Object.values(words).filter((w) => !w.deleted);
@@ -51,71 +54,9 @@ function markStudied() {
   if (!days.has(d)) {
     days.add(d);
     store.set('days', [...days].slice(-400));
-    sync.push();
   }
 }
 
-/* ───────────── PC ↔ 휴대폰 동기화 ───────────── */
-const sync = {
-  timer: null,
-  snapshot() {
-    return {
-      progress,
-      words,
-      days: [...days],
-      daysT,
-      channel: { url: settings.channel, recent: settings.recentChannels, t: settings.channelT || 0 },
-    };
-  },
-  /** 병합된 상태를 로컬에 반영. 화면에 보이는 내용이 바뀌었으면 true */
-  apply(remote) {
-    const before = JSON.stringify(this.snapshot());
-    const m = mergeState(this.snapshot(), remote);
-    for (const k of Object.keys(progress)) if (!m.progress[k]) delete progress[k];
-    Object.assign(progress, m.progress);
-    for (const k of Object.keys(words)) if (!m.words[k]) delete words[k];
-    Object.assign(words, m.words);
-    days.clear();
-    m.days.forEach((d) => days.add(d));
-    daysT = m.daysT;
-    if (m.channel && m.channel.url && (m.channel.t || 0) > (settings.channelT || 0)) {
-      settings.channel = m.channel.url;
-      settings.recentChannels = m.channel.recent || [];
-      settings.channelT = m.channel.t;
-      saveSettings();
-    }
-    store.set('progress', progress);
-    store.set('words', words);
-    store.set('days', [...days]);
-    store.set('daysT', daysT);
-    return before !== JSON.stringify(this.snapshot());
-  },
-  push() {
-    clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.send(), 800);
-  },
-  async send() {
-    try {
-      const res = await fetch('/api/state', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(this.snapshot()),
-      });
-      if (res.ok) this.apply(await res.json());
-    } catch {} // 오프라인이면 다음 기회에
-  },
-  async pull() {
-    try {
-      const res = await fetch('/api/state', { cache: 'no-store' });
-      if (!res.ok) return;
-      const changed = this.apply(await res.json());
-      this.send(); // 이 기기에만 있던 기록도 서버로
-      // 목록·단어장 화면이면 다른 기기의 변경을 바로 보여 준다 (레슨 도중에는 방해하지 않음)
-      const page = location.hash.split('/')[1] || '';
-      if (changed && ['', 'words', 'settings'].includes(page) && !document.activeElement?.matches('input')) route();
-    } catch {}
-  },
-};
 function streak() {
   let n = 0;
   const d = new Date();
@@ -152,12 +93,6 @@ function toast(msg) {
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => t.classList.remove('show'), 2200);
 }
-async function api(path, opts) {
-  const res = await fetch(path, opts);
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok && res.status !== 202) throw new Error(body.error || `요청 실패 (${res.status})`);
-  return { status: res.status, body };
-}
 const icon = {
   play: '<svg viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z" fill="currentColor" stroke="none"/></svg>',
   pause: '<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/></svg>',
@@ -178,126 +113,8 @@ const icon = {
   repeatOne: '<svg viewBox="0 0 24 24"><path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/><path d="M11 10h1.5v5" stroke-width="2"/></svg>',
 };
 
-/* ───────────── 발음: 원어민 신경망 음성(서버) + 기기 음성(대체) ───────────── */
-// settings.voice: 'en-US-AriaNeural' 같은 원어민 음성 ID, 또는 'device:<voiceURI>' (기기 내장 음성)
-if (settings.voice && !settings.voice.startsWith('device:') && !/Neural$/.test(settings.voice)) settings.voice = '';
-
-const tts = {
-  voices: [], // 기기 내장 영어 음성
-  audio: new Audio(),
-  seq: 0,
-  neuralFails: 0,
-  load() {
-    this.voices = speechSynthesis.getVoices().filter((v) => v.lang.startsWith('en'));
-  },
-  useDevice() {
-    return settings.voice.startsWith('device:') || this.neuralFails >= 3;
-  },
-  deviceVoice() {
-    const uri = settings.voice.replace(/^device:/, '');
-    return (
-      this.voices.find((v) => v.voiceURI === uri) ||
-      this.voices.find((v) => v.lang === 'en-US' && /natural|google|samantha|aria|jenny/i.test(v.name)) ||
-      this.voices.find((v) => v.lang === 'en-US') ||
-      this.voices[0]
-    );
-  },
-  url(text) {
-    const v = settings.voice && !settings.voice.startsWith('device:') ? settings.voice : '';
-    return `/api/tts?${new URLSearchParams({ v, t: text.slice(0, 600) })}`;
-  },
-  /** 다음 문장을 미리 받아 두어 반복·연속 재생 사이 끊김을 줄인다 */
-  preload(text) {
-    if (!text || this.useDevice()) return;
-    fetch(this.url(text)).catch(() => {});
-  },
-  speak(text, { rate = 1, onend } = {}) {
-    this.stop();
-    const my = ++this.seq;
-    const done = () => my === this.seq && onend?.();
-    if (this.useDevice()) return this.speakDevice(text, rate, done);
-    const a = this.audio;
-    a.src = this.url(text);
-    a.playbackRate = Math.max(0.5, Math.min(2, settings.rate * rate));
-    a.preservesPitch = true;
-    a.onended = done;
-    a.onerror = () => {
-      if (my !== this.seq) return;
-      if (++this.neuralFails === 3) toast('원어민 음성 서버에 연결할 수 없어 기기 음성으로 읽어요');
-      this.speakDevice(text, rate, done);
-    };
-    a.play().then(
-      () => (this.neuralFails = 0),
-      (err) => {
-        // 자동 재생 제한 등으로 재생이 막힌 경우 기기 음성으로 대체
-        if (my === this.seq && err.name !== 'AbortError') this.speakDevice(text, rate, done);
-      },
-    );
-  },
-  speakDevice(text, rate, onend) {
-    if (!('speechSynthesis' in window)) return toast('이 브라우저는 음성 재생을 지원하지 않습니다');
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    const v = this.deviceVoice();
-    if (v) u.voice = v;
-    u.lang = v?.lang || 'en-US';
-    u.rate = settings.rate * rate;
-    u.onend = onend;
-    u.onerror = (e) => e.error !== 'interrupted' && e.error !== 'canceled' && onend();
-    speechSynthesis.speak(u);
-  },
-  stop() {
-    this.seq++;
-    this.audio.onended = this.audio.onerror = null;
-    this.audio.pause();
-    if ('speechSynthesis' in window) speechSynthesis.cancel();
-  },
-};
-if ('speechSynthesis' in window) {
-  tts.load();
-  speechSynthesis.onvoiceschanged = () => tts.load();
-}
-
-const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-function listen() {
-  return new Promise((resolve, reject) => {
-    if (!Recognition) return reject(new Error('이 브라우저는 음성 인식을 지원하지 않습니다 (Chrome 권장)'));
-    const r = new Recognition();
-    r.lang = 'en-US';
-    r.interimResults = false;
-    r.maxAlternatives = 3;
-    let best = '';
-    r.onresult = (e) => (best = e.results[0][0].transcript);
-    r.onerror = (e) =>
-      reject(new Error(e.error === 'not-allowed' ? '마이크 권한을 허용해 주세요 (HTTPS 또는 localhost 필요)' : '음성을 인식하지 못했어요'));
-    r.onend = () => resolve(best);
-    r.start();
-    listen.current = r;
-  });
-}
-
-/** 목표 문장과 인식 결과를 단어 단위로 맞춰 본다 (LCS) */
-function compareSpeech(target, heard) {
-  const a = target.split(/\s+/).map(norm);
-  const b = heard.split(/\s+/).map(norm).filter(Boolean);
-  const dp = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
-  for (let i = a.length - 1; i >= 0; i--)
-    for (let j = b.length - 1; j >= 0; j--)
-      dp[i][j] = a[i] && a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-  const ok = new Array(a.length).fill(false);
-  let i = 0;
-  let j = 0;
-  while (i < a.length && j < b.length) {
-    if (a[i] && a[i] === b[j]) {
-      ok[i] = true;
-      i++;
-      j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
-    else j++;
-  }
-  const counted = a.filter(Boolean).length || 1;
-  return { ok, score: Math.round((ok.filter(Boolean).length / counted) * 100) };
-}
+/* ───────────── 발음: 안드로이드 TTS (개발 브라우저에서는 Web Speech) ───────────── */
+const tts = createTTS(() => settings, (m) => toast(m));
 
 /* ───────────── 라우터 ───────────── */
 let routeToken = 0;
@@ -318,38 +135,116 @@ function route() {
 }
 window.addEventListener('hashchange', route);
 
-/* ───────────── 홈: 채널의 제목 목록 ───────────── */
+/* ───────────── 홈: 채널의 제목 목록 + 새 영상 자동 가져오기 ───────────── */
 let channelData = store.get('channel', null);
 let homeFilter = '';
+const known = store.get('known', {}); // 채널 → 지금까지 본 영상 ID 목록 (새 영상 판별용)
+const newIds = new Set(store.get('newIds', [])); // 아직 열어 보지 않은 새 영상
+let lastCheck = 0;
+let checking = null;
+let updateInfo = null;
 
-async function loadChannel(force) {
-  const q = new URLSearchParams({ url: settings.channel });
-  if (force) q.set('refresh', '1');
-  const { body } = await api('/api/channel?' + q);
-  channelData = { ...body, source: settings.channel };
+/**
+ * 채널의 최신 목록을 가져와 저장된 목록과 합친다.
+ * @returns {Promise<{ data: object, fresh: object[] }>} fresh = 새로 올라온 영상
+ */
+async function loadChannel() {
+  const data = await getChannel(settings.channel);
+  const source = settings.channel;
+  // '더 불러오기'로 받아 둔 예전 영상은 유지하고, 최신 목록을 앞에 둔다
+  const old = channelData?.source === source ? channelData.videos : [];
+  const firstIds = new Set(data.videos.map((v) => v.id));
+  const videos = [...data.videos, ...old.filter((v) => !firstIds.has(v.id))];
+  const seen = known[source] ? new Set(known[source]) : null;
+  const fresh = seen ? data.videos.filter((v) => !seen.has(v.id)) : [];
+  fresh.forEach((v) => newIds.add(v.id));
+  known[source] = [...new Set([...(known[source] || []), ...videos.map((v) => v.id)])].slice(-2000);
+  channelData = { ...data, videos, continuation: channelData?.source === source && old.length > data.videos.length ? channelData.continuation : data.continuation, source, checkedAt: Date.now() };
   store.set('channel', channelData);
-  return channelData;
+  store.set('known', known);
+  store.set('newIds', [...newIds]);
+  return { data: channelData, fresh };
+}
+
+/**
+ * 새 영상 확인. 앱 시작·앱으로 돌아옴·당겨서 새로고침·새로고침 버튼에서 호출된다.
+ * auto=true 인 자동 확인은 1분에 한 번까지만.
+ */
+function refreshChannel({ auto = false } = {}) {
+  if (checking) return checking;
+  if (auto && Date.now() - lastCheck < 60_000) return Promise.resolve(null);
+  lastCheck = Date.now();
+  const onHome = () => (location.hash.split('/')[1] || '') === '';
+  setRefreshing(true);
+  checking = loadChannel()
+    .then(({ fresh }) => {
+      if (fresh.length) {
+        toast(`새 이야기 ${fresh.length}편을 가져왔어요`);
+        if (settings.autoPrepare) prefetchLessons(fresh.slice(0, 3));
+      } else if (!auto) toast('새로 올라온 이야기가 없어요');
+      if (onHome()) renderHome();
+      return fresh;
+    })
+    .catch((err) => {
+      if (!auto || !channelData) toast(err.message);
+      if (onHome() && !channelData) renderHome(err);
+      return null;
+    })
+    .finally(() => {
+      checking = null;
+      setRefreshing(false);
+    });
+  return checking;
+}
+
+/** 새 영상의 학습 자료를 뒤에서 미리 만들어 둔다 */
+function prefetchLessons(videos) {
+  prefetch(videos, (v, lesson) => {
+    const p = (progress[v.id] ||= { learned: [], total: 0 });
+    Object.assign(p, { titleKo: lesson.titleKo, total: lesson.sentences.length, title: lesson.title });
+    saveProgress();
+    if ((location.hash.split('/')[1] || '') === '') renderHome();
+  });
+}
+
+// 뒤에서 학습 자료를 만들기 시작·완료하면 목록의 상태 표시를 바로 바꾼다
+onJobsChange(() => {
+  if ((location.hash.split('/')[1] || '') === '' && !document.activeElement?.matches('input')) renderHome();
+});
+
+function setRefreshing(on) {
+  document.getElementById('ptr')?.classList.toggle('spin', on);
+  const btn = document.getElementById('refresh');
+  if (btn) btn.disabled = on;
 }
 
 function storyStatus(v) {
+
   const p = progress[v.id];
   if (!p?.total) return { cls: '', pct: 0 };
   const pct = Math.round((p.learned.length / p.total) * 100);
   return { cls: pct >= 100 ? 'done' : 'started', pct };
 }
 
-function renderHome() {
-  const token = routeToken;
+function renderHome(error) {
   const learnedTotal = Object.values(progress).reduce((n, p) => n + (p.learned?.length || 0), 0);
   const ch = channelData?.source === settings.channel ? channelData : null;
+  const checked = ch?.checkedAt ? new Date(ch.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 
   $view.innerHTML = `
+    <div id="ptr" class="ptr" aria-hidden="true">${icon.refresh}</div>
+    ${
+      updateInfo
+        ? `<div class="card update-banner"><div><b>새 버전 ${esc(updateInfo.version)}</b><small>눌러서 내려받은 뒤 '설치'를 누르세요</small></div>
+            <button class="btn primary" id="doUpdate">업데이트</button></div>`
+        : ''
+    }
     <div class="eyebrow">English Tales · 이야기로 배우는 영어</div>
     <div class="channel">
       ${ch?.avatar ? `<img src="${esc(ch.avatar)}" alt="" referrerpolicy="no-referrer" />` : ''}
       <div>
         <div class="name">${esc(ch?.title || '채널 불러오는 중…')}</div>
-        <div class="muted" style="font-size:13px">${ch ? `이야기 ${ch.videos.length}편${ch.continuation ? '+' : ''}` : esc(settings.channel)}</div>
+        <div class="muted" style="font-size:13px">${ch ? `이야기 ${ch.videos.length}편${ch.continuation ? '+' : ''}${checked ? ` · ${checked} 확인` : ''}` : esc(settings.channel)}</div>
       </div>
     </div>
     <div class="stats">
@@ -358,8 +253,11 @@ function renderHome() {
       <div class="card stat"><b>${streak()}일</b><span>연속 학습</span></div>
     </div>
     <label class="search">${icon.search}<input id="q" type="search" placeholder="제목으로 찾기" value="${esc(homeFilter)}" aria-label="제목 검색" /></label>
-    <h2 class="section"><span>제목별 학습</span><button class="btn ghost" id="refresh" style="min-height:32px;padding:0 10px;font-size:12.5px">${icon.refresh.replace('<svg', '<svg style="width:16px;height:16px"')} 새로고침</button></h2>
-    <div class="stories" id="stories">${ch ? '' : '<div class="skeleton"></div>'.repeat(5)}</div>
+    <h2 class="section"><span>제목별 학습 ${newIds.size ? `<span class="chip new">NEW ${newIds.size}</span>` : ''}</span>
+      <button class="btn ghost" id="refresh" style="min-height:32px;padding:0 10px;font-size:12.5px">${icon.refresh.replace('<svg', '<svg style="width:16px;height:16px"')} 새 영상 확인</button></h2>
+    <div class="stories" id="stories">${
+      ch ? '' : error ? `<div class="empty">${icon.book}<div>${esc(error.message)}</div><a class="btn" href="#/settings" style="margin-top:12px">채널 설정 확인</a></div>` : '<div class="skeleton"></div>'.repeat(5)
+    }</div>
     <div id="more"></div>`;
 
   const paint = () => {
@@ -374,19 +272,19 @@ function renderHome() {
           const idx = data.videos.indexOf(v) + 1;
           const s = storyStatus(v);
           const p = progress[v.id];
-          return `<a class="card story ${s.cls}" href="#/lesson/${v.id}" data-title="${esc(v.title)}">
+          const status = jobOf(v.id)
+            ? '<span class="chip accent">학습 자료 준비 중…</span>'
+            : p?.total && p.learned.length
+              ? `<span class="chip ${s.cls === 'done' ? 'good' : 'accent'}">${s.cls === 'done' ? '완료' : `${p.learned.length}/${p.total}문장`}</span><div class="bar"><i style="width:${s.pct}%"></i></div>`
+              : p?.total
+                ? '<span class="chip good">학습 자료 준비됨</span>'
+                : '<span class="chip">새 이야기</span>';
+          return `<a class="card story ${s.cls} ${newIds.has(v.id) ? 'is-new' : ''}" href="#/lesson/${v.id}">
             <div class="num">${idx}</div>
             <div>
-              <div class="t">${esc(v.title)}</div>
+              <div class="t">${newIds.has(v.id) ? '<span class="chip new">NEW</span> ' : ''}${esc(v.title)}</div>
               ${p?.titleKo ? `<div class="ko">${esc(p.titleKo)}</div>` : ''}
-              <div class="meta">
-                ${v.duration ? `<span class="chip">${esc(v.duration)}</span>` : ''}
-                ${
-                  p?.total
-                    ? `<span class="chip ${s.cls === 'done' ? 'good' : 'accent'}">${s.cls === 'done' ? '완료' : `${p.learned.length}/${p.total}문장`}</span><div class="bar"><i style="width:${s.pct}%"></i></div>`
-                    : '<span class="chip">새 이야기</span>'
-                }
-              </div>
+              <div class="meta">${v.duration ? `<span class="chip">${esc(v.duration)}</span>` : ''}${status}</div>
             </div>
           </a>`;
         })
@@ -400,11 +298,13 @@ function renderHome() {
     e.target.disabled = true;
     e.target.textContent = '불러오는 중…';
     try {
-      const { body } = await api('/api/channel/more?token=' + encodeURIComponent(channelData.continuation));
+      const more = await getMoreVideos(channelData.continuation);
       const seen = new Set(channelData.videos.map((v) => v.id));
-      channelData.videos.push(...body.videos.filter((v) => !seen.has(v.id)));
-      channelData.continuation = body.continuation;
+      channelData.videos.push(...more.videos.filter((v) => !seen.has(v.id)));
+      channelData.continuation = more.continuation;
+      known[channelData.source] = [...new Set([...(known[channelData.source] || []), ...more.videos.map((v) => v.id)])];
       store.set('channel', channelData);
+      store.set('known', known);
       paint();
     } catch (err) {
       toast(err.message);
@@ -414,40 +314,52 @@ function renderHome() {
 
   document.getElementById('q').addEventListener('input', (e) => {
     homeFilter = e.target.value.trim();
-    if (channelData) paint();
+    if (channelData?.source === settings.channel) paint();
   });
-  const refresh = async (force) => {
-    try {
-      await loadChannel(force);
-      if (token === routeToken) renderHome();
-    } catch (err) {
-      if (token !== routeToken) return;
-      document.getElementById('stories').innerHTML = `<div class="empty">${icon.book}<div>${esc(err.message)}</div>
-        <a class="btn" href="#/settings" style="margin-top:12px">채널 설정 확인</a></div>`;
-    }
-  };
-  document.getElementById('refresh').addEventListener('click', () => refresh(true));
+  document.getElementById('refresh').addEventListener('click', () => refreshChannel());
+  document.getElementById('doUpdate')?.addEventListener('click', () => openDownload(updateInfo.url));
+  if (checking) setRefreshing(true);
   if (ch) paint();
-  else refresh(false);
+  else if (!error) refreshChannel();
 }
+
+/* 당겨서 새로고침: 목록 맨 위에서 아래로 끌었다 놓으면 새 영상 확인 */
+(() => {
+  let startY = null;
+  let dy = 0;
+  const onHome = () => (location.hash.split('/')[1] || '') === '';
+  window.addEventListener('touchstart', (e) => {
+    startY = onHome() && window.scrollY <= 0 && !document.querySelector('.sheet') ? e.touches[0].clientY : null;
+    dy = 0;
+  }, { passive: true });
+  window.addEventListener('touchmove', (e) => {
+    if (startY === null) return;
+    dy = Math.max(0, e.touches[0].clientY - startY);
+    const ptr = document.getElementById('ptr');
+    if (ptr) {
+      ptr.style.transform = `translate(-50%, ${Math.min(dy * 0.5, 70)}px) rotate(${dy * 2}deg)`;
+      ptr.style.opacity = Math.min(1, dy / 80);
+    }
+  }, { passive: true });
+  window.addEventListener('touchend', () => {
+    const ptr = document.getElementById('ptr');
+    if (ptr) {
+      ptr.style.transform = '';
+      ptr.style.opacity = '';
+    }
+    if (startY !== null && dy > 90) refreshChannel();
+    startY = null;
+  });
+})();
 
 /* ───────────── 레슨 ───────────── */
 const lessons = new Map();
 
 async function fetchLesson(id, title, onWait) {
   if (lessons.has(id)) return lessons.get(id);
-  const token = routeToken;
-  for (;;) {
-    const { status, body } = await api(`/api/lesson/${id}?title=${encodeURIComponent(title || '')}`);
-    if (status === 200) {
-      lessons.set(id, body);
-      return body;
-    }
-    if (token !== routeToken) return null;
-    onWait(body);
-    await new Promise((r) => setTimeout(r, 1500));
-    if (token !== routeToken) return null;
-  }
+  const lesson = (await getLesson(id)) || (await buildLesson(id, title, onWait));
+  lessons.set(id, lesson);
+  return lesson;
 }
 
 function titleOf(id) {
@@ -457,6 +369,7 @@ function titleOf(id) {
 async function renderLesson(id, tab) {
   const token = routeToken;
   const title = titleOf(id);
+  if (newIds.delete(id)) store.set('newIds', [...newIds]);
   $view.innerHTML = `
     <div class="topbar"><a class="icon-btn" href="#/" aria-label="목록으로">${icon.back}</a><div class="title">${esc(title)}</div></div>
     <div class="card loading" id="loading">
@@ -516,7 +429,7 @@ async function renderLesson(id, tab) {
     <section id="pane"></section>`;
 
   document.getElementById('regen')?.addEventListener('click', async () => {
-    await api(`/api/lesson/${id}`, { method: 'DELETE' });
+    await deleteLesson(id);
     lessons.delete(id);
     route();
   });
@@ -575,7 +488,7 @@ function paneSentences(pane, lesson, p) {
     </div>
     <div class="kbd-hint" aria-hidden="true">
       <kbd>Space</kbd> 연속 재생 <kbd>←</kbd><kbd>→</kbd> 이전·다음 <kbd>R</kbd> 듣기 <kbd>S</kbd> 천천히 <kbd>O</kbd> 한 문장 반복
-      <kbd>M</kbd> 따라 말하기 <kbd>T</kbd> 해석 <kbd>L</kbd> 익힘
+      <kbd>T</kbd> 해석 <kbd>L</kbd> 익힘
     </div>
     <div class="sentences">
       ${lesson.sentences
@@ -588,11 +501,8 @@ function paneSentences(pane, lesson, p) {
             <button class="icon-btn" data-act="play" aria-label="듣기">${icon.speaker}</button>
             <button class="icon-btn" data-act="slow" aria-label="천천히 듣기">${icon.slow}</button>
             <button class="icon-btn" data-act="loop" aria-label="이 문장 반복 듣기" title="이 문장 반복">${icon.repeatOne}</button>
-            <button class="icon-btn" data-act="mic" aria-label="따라 말하기">${icon.mic}</button>
             <button class="icon-btn ${learned.has(s.i) ? 'on' : ''}" data-act="learn" aria-label="익힘 표시">${icon.check}</button>
-            <span class="score"></span>
           </div>
-          <div class="heard" hidden></div>
         </article>`,
         )
         .join('')}
@@ -639,36 +549,6 @@ function paneSentences(pane, lesson, p) {
       highlight(i);
       tts.speak(s.en, { rate: act === 'slow' ? 0.65 : 1, onend: () => highlight(-1) });
     } else if (act === 'learn') setLearned(i, !learned.has(i));
-    else if (act === 'mic') {
-      const btn = e.target.closest('[data-act]');
-      if (btn.classList.contains('rec')) return listen.current?.stop();
-      player.stop();
-      tts.stop();
-      btn.classList.add('rec');
-      try {
-        const heard = await listen();
-        const { ok, score } = compareSpeech(s.en, heard);
-        card.querySelectorAll('.en .w').forEach((span, k) => {
-          span.classList.toggle('ok', ok[k]);
-          span.classList.toggle('miss', !ok[k]);
-        });
-        const h = card.querySelector('.heard');
-        h.hidden = false;
-        h.textContent = heard ? `들린 문장: “${heard}”` : '아무 말도 들리지 않았어요';
-        const sc = card.querySelector('.score');
-        sc.textContent = `${score}점`;
-        sc.style.color = score >= 80 ? 'var(--good)' : score >= 50 ? 'var(--accent)' : 'var(--bad)';
-        if (score >= 80) {
-          setLearned(i, true);
-          toast(score === 100 ? '완벽해요! 🎉' : '좋아요! 익힌 문장으로 표시했어요');
-        }
-        markStudied();
-      } catch (err) {
-        toast(err.message);
-      } finally {
-        btn.classList.remove('rec');
-      }
-    }
   });
 
   player.mount(lesson, (i) => highlight(i, true));
@@ -783,7 +663,6 @@ const player = {
   say() {
     clearTimeout(this.timer);
     const s = this.lesson.sentences[this.i];
-    tts.preload(this.lesson.sentences[this.i + 1]?.en);
     tts.speak(s.en, {
       onend: () => {
         if (!this.playing) return;
@@ -1047,7 +926,7 @@ async function openWordSheet(token, lesson) {
   let v = vocabFor(lesson, token);
   if (!v) {
     try {
-      const { body } = await api('/api/define?word=' + encodeURIComponent(clean));
+      const body = await define(clean);
       const s = lesson.sentences.find((x) => x.en.toLowerCase().includes(clean));
       v = { ...body, example: s?.en || '', i: s?.i };
     } catch {
@@ -1165,31 +1044,6 @@ function renderFlashcards(deck) {
 }
 
 /* ───────────── 설정 ───────────── */
-const isHostPC = () => ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
-// 넓은 화면(PC)에서만 QR을 보여 준다 — 휴대폰으로 찍어서 들어가는 용도
-const showQR = () => isHostPC() || matchMedia('(min-width: 700px) and (pointer: fine)').matches;
-let serverInfo = null; // /api/status 응답 (원어민 음성 목록 등)
-
-/** QR 코드 라이브러리는 PC 설정 화면에서만 필요하므로 그때 불러온다 */
-async function drawQR(el, text) {
-  try {
-    if (!window.qrcode) {
-      await new Promise((resolve, reject) => {
-        const sc = document.createElement('script');
-        sc.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js';
-        sc.onload = resolve;
-        sc.onerror = reject;
-        document.head.appendChild(sc);
-      });
-    }
-    const qr = window.qrcode(0, 'M');
-    qr.addData(text);
-    qr.make();
-    el.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
-  } catch {
-    el.remove();
-  }
-}
 function renderSettings() {
   const recent = [DEFAULT_CHANNEL, ...settings.recentChannels].filter((c, i, a) => a.indexOf(c) === i && c !== settings.channel).slice(0, 5);
   $view.innerHTML = `
@@ -1205,16 +1059,30 @@ function renderSettings() {
       </form>
       ${recent.length ? `<div class="presets"><span class="muted" style="font-size:12.5px;align-self:center">최근:</span>${recent.map((c) => `<button type="button" data-ch="${esc(c)}">${esc(c.replace(/^https?:\/\/(www\.)?youtube\.com\//, ''))}</button>`).join('')}</div>` : ''}
     </div>
-    <p class="muted" style="font-size:12.5px;margin:8px 4px 0">영어 자막이 있는 채널이면 어디든 가능해요. 영상은 불러오지 않고 제목과 자막만 학습 자료로 추출합니다.</p>
+    <p class="muted" style="font-size:12.5px;margin:8px 4px 0">영어 자막이 있는 채널이면 어디든 가능해요. 영상은 받지 않고 제목과 자막만 학습 자료로 추출합니다.</p>
+
+    <h2 class="section">새 영상</h2>
+    <div class="card form">
+      <div class="row"><div class="label">새 이야기 학습 자료 자동 준비<small>앱을 열거나 새로고침할 때 새 영상이 있으면 해석·단어를 미리 만들어 둬요 (최대 3편)</small></div>
+        <label class="switch"><input id="autoPrepare" type="checkbox" ${settings.autoPrepare ? 'checked' : ''} /><span></span></label></div>
+      <div class="row"><div class="label">지금 확인<small>${channelData?.checkedAt ? '마지막 확인 ' + new Date(channelData.checkedAt).toLocaleString() : '아직 확인하지 않았어요'}</small></div>
+        <button class="btn" id="checkNow">${icon.refresh} 새 영상 확인</button></div>
+    </div>
 
     <h2 class="section">발음 (음성)</h2>
     <div class="card form">
-      <div class="row"><div class="label">목소리<small>원어민 음성은 실제 사람처럼 자연스럽게 읽어 줘요</small></div><select id="voice"></select></div>
+      <div class="row"><div class="label">목소리<small>휴대폰의 영어 음성 중에서 골라요</small></div><select id="voice"><option>불러오는 중…</option></select></div>
       <div class="row"><div class="label">말하기 속도<small id="rateLabel">${settings.rate.toFixed(2)}배</small></div>
         <input id="rate" type="range" min="0.6" max="1.3" step="0.05" value="${settings.rate}" /></div>
-      <div class="row"><div class="label">반복 사이 쉬는 시간<small id="gapLabel">${(settings.gap ?? 0.8).toFixed(1)}초 · 따라 말할 시간을 주려면 늘리세요</small></div>
+      <div class="row"><div class="label">반복 사이 쉬는 시간<small id="gapLabel">${(settings.gap ?? 0.8).toFixed(1)}초 · 따라 읽을 시간을 주려면 늘리세요</small></div>
         <input id="gap" type="range" min="0" max="4" step="0.5" value="${settings.gap ?? 0.8}" /></div>
       <div class="row"><div class="label">미리 듣기</div><button class="btn" id="test">${icon.speaker} 들어보기</button></div>
+      ${
+        isNative()
+          ? `<div class="row"><div class="label">더 자연스러운 음성 받기<small>안드로이드 설정에서 Google 음성 데이터(영어-미국)를 설치하면 원어민처럼 읽어 줘요</small></div>
+              <button class="btn" id="ttsInstall">음성 데이터</button></div>`
+          : ''
+      }
     </div>
 
     <h2 class="section">화면</h2>
@@ -1225,90 +1093,102 @@ function renderSettings() {
         <select id="theme">${[['auto', '시스템 설정'], ['light', '라이트'], ['dark', '다크']].map(([v, l]) => `<option value="${v}" ${settings.theme === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     </div>
 
-    <h2 class="section">PC · 휴대폰 함께 쓰기</h2>
+    <h2 class="section">앱 정보 · 데이터</h2>
     <div class="card form">
-      <div class="row devices">
-        <div class="label">
-          ${isHostPC() ? '휴대폰에서 열기' : '다른 기기에서 열기'}
-          <small id="lanInfo">${
-            isHostPC()
-              ? '같은 Wi-Fi에서 휴대폰 카메라로 QR 코드를 찍으세요'
-              : `이 주소를 휴대폰·PC 어디서나 여세요: <b>${esc(location.origin)}</b>`
-          }</small>
-          <small>학습 기록·단어장·채널 설정은 기기끼리 자동으로 맞춰집니다.</small>
-        </div>
-        ${showQR() ? '<div id="qr" class="qr" aria-label="접속 QR 코드"></div>' : ''}
-      </div>
-      <div class="row"><div class="label">지금 동기화<small id="syncInfo">창으로 돌아올 때마다 자동으로 가져와요</small></div>
-        <button class="btn" id="syncNow">${icon.refresh} 동기화</button></div>
-    </div>
-
-    <h2 class="section">해석 엔진 · 데이터</h2>
-    <div class="card form">
-      <div class="row"><div class="label">해석 엔진<small id="engine">확인 중…</small></div></div>
-      <div class="row"><div class="label">학습 기록 초기화<small>익힌 문장·단어장·연속 학습일을 이 기기에서 지웁니다</small></div>
+      <div class="row"><div class="label">버전 ${esc(appInfo.version)}<small id="updInfo">${updateInfo ? `새 버전 ${esc(updateInfo.version)} 이 있어요` : 'GitHub에서 새 버전을 확인해요'}</small></div>
+        <button class="btn ${updateInfo ? 'primary' : ''}" id="upd">${updateInfo ? '업데이트' : '업데이트 확인'}</button></div>
+      <div class="row"><div class="label">저장된 학습 자료<small id="lessonCount">세는 중…</small></div>
+        <button class="btn" id="clearLessons">비우기</button></div>
+      <div class="row"><div class="label">학습 기록 초기화<small>익힌 문장·단어장·연속 학습일을 지웁니다</small></div>
         <button class="btn" id="reset" style="color:var(--bad)">초기화</button></div>
     </div>
-    <p class="muted" style="font-size:12px;text-align:center;margin-top:24px">English Tales · 학습 기록은 서버를 통해 기기끼리 동기화됩니다</p>`;
+    <p class="muted" style="font-size:12px;text-align:center;margin-top:24px">English Tales · 모든 학습 기록은 이 휴대폰에만 저장됩니다</p>`;
 
-  const voiceSel = document.getElementById('voice');
-  const fillVoices = () => {
-    const neural = serverInfo?.voices || [];
-    const cur = settings.voice || serverInfo?.defaultVoice || '';
-    voiceSel.innerHTML =
-      (neural.length
-        ? `<optgroup label="원어민 음성 (추천)">${neural
-            .map((v) => `<option value="${esc(v.id)}" ${cur === v.id ? 'selected' : ''}>${esc(v.label)}</option>`)
-            .join('')}</optgroup>`
-        : '') +
-      (tts.voices.length
-        ? `<optgroup label="기기 음성 (오프라인)">${tts.voices
-            .map((v) => `<option value="device:${esc(v.voiceURI)}" ${cur === 'device:' + v.voiceURI ? 'selected' : ''}>${esc(v.name)} (${v.lang})</option>`)
-            .join('')}</optgroup>`
-        : '');
-  };
-  fillVoices();
-  if ('speechSynthesis' in window) speechSynthesis.addEventListener('voiceschanged', fillVoices, { once: true });
-  voiceSel.onchange = () => {
-    settings.voice = voiceSel.value;
-    tts.neuralFails = 0;
+  const on = (id, ev, fn) => document.getElementById(id)?.addEventListener(ev, fn);
+
+  // 목소리 목록 (안드로이드 TTS 또는 브라우저 음성)
+  tts.voices().then((voices) => {
+    const sel = document.getElementById('voice');
+    if (!sel) return;
+    const cur = tts.current();
+    const sorted = [...voices].sort((a, b) => /US/i.test(b.lang) - /US/i.test(a.lang) || a.name.localeCompare(b.name));
+    sel.innerHTML = sorted.length
+      ? sorted
+          .map((v) => `<option value="${esc(v.id)}" ${cur?.id === v.id ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})${v.local === false ? ' · 고품질' : ''}</option>`)
+          .join('')
+      : '<option>영어 음성 없음 — 음성 데이터를 설치하세요</option>';
+  });
+  on('voice', 'change', (e) => {
+    settings.voice = e.target.value;
     saveSettings();
     tts.speak('Once upon a time, there was a quiet little town.');
-  };
-  document.getElementById('rate').oninput = (e) => {
+  });
+  on('rate', 'input', (e) => {
     settings.rate = Number(e.target.value);
     document.getElementById('rateLabel').textContent = settings.rate.toFixed(2) + '배';
     saveSettings();
-  };
-  document.getElementById('gap').oninput = (e) => {
+  });
+  on('gap', 'input', (e) => {
     settings.gap = Number(e.target.value);
-    document.getElementById('gapLabel').textContent = `${settings.gap.toFixed(1)}초 · 따라 말할 시간을 주려면 늘리세요`;
+    document.getElementById('gapLabel').textContent = `${settings.gap.toFixed(1)}초 · 따라 읽을 시간을 주려면 늘리세요`;
     saveSettings();
-  };
-  document.getElementById('test').onclick = () => tts.speak('Once upon a time, there was a quiet little town.');
-  document.getElementById('showKo').onchange = (e) => {
+  });
+  on('test', 'click', () => tts.speak('Once upon a time, there was a quiet little town.'));
+  on('ttsInstall', 'click', () => tts.openInstall());
+  on('showKo', 'change', (e) => {
     settings.showKo = e.target.checked;
     saveSettings();
-  };
-  document.getElementById('theme').onchange = (e) => {
+  });
+  on('theme', 'change', (e) => {
     settings.theme = e.target.value;
     saveSettings();
     applyTheme();
-  };
-  document.getElementById('reset').onclick = () => {
+  });
+  on('autoPrepare', 'change', (e) => {
+    settings.autoPrepare = e.target.checked;
+    saveSettings();
+  });
+  on('checkNow', 'click', async () => {
+    const fresh = await refreshChannel();
+    if (fresh?.length) location.hash = '#/';
+  });
+
+  on('upd', 'click', async (e) => {
+    if (updateInfo) return openDownload(updateInfo.url);
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = '확인 중…';
+    try {
+      updateInfo = await checkUpdate();
+    } catch {}
+    document.getElementById('updInfo').textContent = updateInfo ? `새 버전 ${updateInfo.version} 이 있어요` : '최신 버전이에요';
+    btn.disabled = false;
+    btn.textContent = updateInfo ? '업데이트' : '업데이트 확인';
+    btn.classList.toggle('primary', Boolean(updateInfo));
+  });
+
+  db.keys().then((keys) => {
+    const n = keys.filter((k) => String(k).startsWith('lesson:')).length;
+    const el = document.getElementById('lessonCount');
+    if (el) el.textContent = `${n}개 이야기 · 인터넷 없이도 열 수 있어요`;
+  });
+  on('clearLessons', 'click', async () => {
+    if (!confirm('저장된 학습 자료를 지울까요? (학습 기록·단어장은 남아요. 다시 열면 새로 만들어요)')) return;
+    for (const k of await db.keys()) if (String(k).startsWith('lesson:')) await db.del(k);
+    lessons.clear();
+    toast('학습 자료를 비웠어요');
+    renderSettings();
+  });
+  on('reset', 'click', () => {
     if (!confirm('학습 기록과 단어장을 모두 지울까요?')) return;
-    // 지운 기록이 다른 기기에서 되살아나지 않도록 '지움' 표시를 남긴다
-    const now = Date.now();
-    for (const k of Object.keys(progress)) progress[k] = { ...progress[k], learned: [], quiz: 0, t: now };
-    for (const k of Object.keys(words)) words[k] = { deleted: true, t: now };
+    for (const k of Object.keys(progress)) progress[k] = { ...progress[k], learned: [], quiz: 0 };
+    for (const k of Object.keys(words)) delete words[k];
     days.clear();
-    daysT = now;
     store.set('days', []);
-    store.set('daysT', daysT);
     saveProgress();
     saveWords();
-    toast('초기화했어요 (PC·휴대폰 모두 적용)');
-  };
+    toast('초기화했어요');
+  });
 
   const change = async (url) => {
     const btn = document.querySelector('#chForm button');
@@ -1317,11 +1197,9 @@ function renderSettings() {
     const prev = settings.channel;
     settings.channel = url.trim();
     try {
-      const data = await loadChannel(true);
+      const { data } = await loadChannel();
       settings.recentChannels = [prev, ...settings.recentChannels.filter((c) => c !== prev && c !== settings.channel)].slice(0, 6);
-      settings.channelT = Date.now();
       saveSettings();
-      sync.push();
       toast(`채널 변경: ${data.title} · 이야기 ${data.videos.length}편`);
       location.hash = '#/';
     } catch (err) {
@@ -1331,45 +1209,17 @@ function renderSettings() {
       btn.textContent = '변경';
     }
   };
-  document.getElementById('chForm').onsubmit = (e) => {
+  on('chForm', 'submit', (e) => {
     e.preventDefault();
     const v = document.getElementById('ch').value;
     if (v.trim()) change(v);
-  };
+  });
   document.querySelector('.presets')?.addEventListener('click', (e) => {
     const b = e.target.closest('[data-ch]');
     if (b) change(b.dataset.ch);
   });
-
-  document.getElementById('syncNow').onclick = async () => {
-    await sync.pull();
-    document.getElementById('syncInfo').textContent = '방금 동기화했어요 · ' + new Date().toLocaleTimeString();
-  };
-
-  api('/api/status')
-    .then(({ body }) => {
-      serverInfo = body;
-      fillVoices();
-      const qr = document.getElementById('qr');
-      if (qr && !isHostPC()) drawQR(qr, location.origin);
-      else if (qr && body.lanUrl) {
-        document.getElementById('lanInfo').innerHTML = `같은 Wi-Fi에서 QR 코드를 찍거나 <b>${esc(body.lanUrl)}</b> 로 접속하세요`;
-        drawQR(qr, body.lanUrl);
-      } else if (qr) {
-        qr.remove();
-        document.getElementById('lanInfo').textContent = '네트워크 주소를 찾지 못했어요. PC가 Wi-Fi/랜에 연결되어 있는지 확인하세요.';
-      }
-      document.getElementById('engine').textContent = body.claude
-        ? 'Claude — 자연스러운 해석 + 단어·표현 해설'
-        : '기본 모드 — 무료 번역 + 사전 (서버에 ANTHROPIC_API_KEY를 설정하면 Claude 사용)';
-    })
-    .catch(() => (document.getElementById('engine').textContent = '서버에 연결할 수 없어요 (오프라인)'));
 }
 
-/* ───────────── 시작 ───────────── */
-if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {});
-}
 /* ───────────── PC 키보드 단축키 ───────────── */
 function clickIf(sel) {
   const el = document.querySelector(sel);
@@ -1422,7 +1272,6 @@ document.addEventListener('keydown', (e) => {
       r: () => clickIf(`${cur} [data-act="play"]`),
       s: () => clickIf(`${cur} [data-act="slow"]`),
       o: () => clickIf(`${cur} [data-act="loop"]`),
-      m: () => clickIf(`${cur} [data-act="mic"]`),
       l: () => clickIf(`${cur} [data-act="learn"]`),
       t: () => clickIf('#toggleKo'),
     };
@@ -1435,9 +1284,28 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// 다른 기기에서 공부한 기록을 창으로 돌아올 때마다 가져온다
-document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && sync.pull());
-window.addEventListener('focus', () => sync.pull());
+/* ───────────── 앱 생명주기: 새 영상 자동 확인 · 업데이트 확인 · 뒤로 가기 ───────────── */
+const AppPlugin = globalThis.Capacitor?.Plugins?.App;
+if (isNative() && AppPlugin) {
+  // 앱으로 돌아올 때마다(다른 앱 사용 후, 화면 켤 때) 새 영상 확인
+  AppPlugin.addListener('resume', () => refreshChannel({ auto: true }));
+  // 안드로이드 뒤로 가기: 창 닫기 → 이전 화면 → 목록에서는 앱을 뒤로 보내기
+  AppPlugin.addListener('backButton', () => {
+    if (document.querySelector('.sheet')) return closeSheet();
+    const page = location.hash.split('/')[1] || '';
+    if (page) history.length > 1 ? history.back() : (location.hash = '#/');
+    else AppPlugin.minimizeApp();
+  });
+} else {
+  document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && refreshChannel({ auto: true }));
+}
 
 route();
-sync.pull();
+// 앱을 열면 바로 새 영상을 확인 (저장된 목록은 즉시 보여 주고 뒤에서 갱신)
+if (channelData?.source === settings.channel) refreshChannel({ auto: true });
+checkUpdate()
+  .then((u) => {
+    updateInfo = u;
+    if (u && (location.hash.split('/')[1] || '') === '') renderHome();
+  })
+  .catch(() => {});

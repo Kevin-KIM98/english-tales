@@ -1,11 +1,9 @@
-# PR을 올리거나 main에 머지하면 자동으로 검사합니다.
-# Render는 이 검사가 통과한 커밋만 배포합니다 (render.yaml 의 autoDeployTrigger: checksPass).
+# PR을 올리면 자동으로 검사합니다. 통과해야 main 에 머지할 수 있습니다.
+# 머지 후 APK 빌드·배포는 android.yml 이 합니다.
 name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
 
 jobs:
   test:
@@ -17,5 +15,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run build
       - run: npm run check
       - run: npm test
