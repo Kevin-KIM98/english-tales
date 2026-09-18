@@ -255,13 +255,18 @@ export async function translateMany(lines, onProgress = () => {}, opts = {}) {
   const todo = src.map((l, i) => (l ? i : -1)).filter((i) => i >= 0);
 
   // ① 해석 엔진(LLM)이 켜져 있으면 문맥까지 보고 먼저 번역한다
+  let byLlm = 0;
   if (engineReady()) {
     const ko = await llmTranslate(
       todo.map((i) => src[i]),
       opts,
       (p) => onProgress(p * 0.9),
     );
-    todo.forEach((i, k) => ko[k] && (out[i] = ko[k]));
+    todo.forEach((i, k) => {
+      if (!ko[k]) return;
+      out[i] = ko[k];
+      byLlm++;
+    });
   }
 
   // ② LLM 이 없거나 받아 내지 못한 줄만 무료 번역기로
@@ -287,6 +292,7 @@ export async function translateMany(lines, onProgress = () => {}, opts = {}) {
   }
   onProgress(1);
   out.failed = todo.filter((i) => !out[i]).length;
+  out.llm = byLlm; // 해석 엔진이 해낸 줄 수 (나머지는 무료 번역기)
   return out;
 }
 
@@ -366,7 +372,8 @@ export async function enrich({ title, sentences }, onProgress = () => {}) {
   const expressions = findExpressions(sentences).map((e) => ({ ...e, example: sentences[e.i].en }));
   onProgress(1);
   const lesson = {
-    engine: engineReady() ? engineModel() : 'basic',
+    // 해석 엔진이 절반 넘게 해냈을 때만 그 이름을 남긴다 (한도 초과로 무료 번역기가 대신했으면 'basic')
+    engine: engineReady() && ko.llm > ko.length / 2 ? engineModel() : 'basic',
     titleKo: ko[0] || '',
     sentences: sentences.map((s, k) => ({ ...s, ko: ko[k + 1] || '' })),
     vocab,

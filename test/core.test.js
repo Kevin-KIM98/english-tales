@@ -306,3 +306,28 @@ test('해석 엔진: 키 확인은 쓸 수 있는 모델을 골라 준다', asyn
   assert.equal(picked, 'gemini-flash-lite-latest'); // 무료 한도가 넉넉한 쪽을 고른다
   assert.deepEqual(models, ['gemini-flash-latest', 'gemini-flash-lite-latest']);
 });
+
+test('해석 엔진: LLM 이 해낸 줄 수를 알려 준다 (엔진 표시 판단용)', async (t) => {
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0, budget: 0 });
+  t.after(() => (setTransport(null), setEngine({}), setPacing({ gap: 120, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000, budget: 30000, lanes: 3 })));
+  setEngine({ on: true, key: 'k' });
+  let llmFails = false;
+  setTransport(async (url, { body }) => {
+    if (isLlm(url)) {
+      if (llmFails) return { status: 429, text: '{"error":{"message":"quota"}}' };
+      return geminiReply(askedLines(body).map(({ n, line }) => ({ n, ko: `엘엘엠(${line})` })));
+    }
+    const q = decodeURIComponent(new URL(url).searchParams.get('q'));
+    const src = q.split('\n');
+    return { status: 200, text: JSON.stringify([src.map((l, k) => [`번역(${l})` + (k < src.length - 1 ? '\n' : ''), l + (k < src.length - 1 ? '\n' : '')]), null, 'en']) };
+  });
+
+  const good = await translateMany(['It is not loud.', 'Nobody tells you.']);
+  assert.equal(good.llm, 2); // 처음부터 LLM 이 다 했다
+
+  llmFails = true; // 한도 초과 → 무료 번역기가 대신한다
+  const fallback = await translateMany(['It is not loud.', 'Nobody tells you.']);
+  assert.equal(fallback.llm, 0);
+  assert.equal(fallback.failed, 0);
+  assert.equal(fallback[0], '번역(It is not loud.)');
+});
