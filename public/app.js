@@ -4,6 +4,7 @@ import { getChannel, getMoreVideos } from './lib/youtube.js';
 import { buildLesson, getLesson, refillLesson, missingCount, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
 import { define } from './lib/enrich.js';
 import { findTraps } from './lib/expressions.js';
+import { resumeIndex } from './lib/study.js';
 import { createTTS } from './lib/tts.js';
 import { db } from './lib/db.js';
 import { checkUpdate, applyUpdate, prepareWebUpdate, markAppReady, appInfo } from './lib/update.js';
@@ -544,6 +545,7 @@ async function renderLesson(id, tab) {
     }
   });
 
+  let firstPane = true; // 레슨을 연 직후 한 번만 '이어서 공부해요' 안내
   const showTab = (k) => {
     player.stop(true);
     tts.stop();
@@ -554,10 +556,11 @@ async function renderLesson(id, tab) {
       b.setAttribute('aria-selected', b.dataset.tab === k);
     });
     const pane = document.getElementById('pane');
-    if (k === 'sentences') paneSentences(pane, lesson, p);
+    if (k === 'sentences') paneSentences(pane, lesson, p, firstPane);
     else if (k === 'vocab') paneVocab(pane, lesson);
     else if (k === 'expressions') paneExpressions(pane, lesson);
     else paneQuiz(pane, lesson, p);
+    firstPane = false;
   };
   document.querySelector('.tabs').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-tab]');
@@ -594,8 +597,9 @@ function sentenceHTML(lesson, s) {
 }
 
 /* 문장 탭 */
-function paneSentences(pane, lesson, p) {
+function paneSentences(pane, lesson, p, announce) {
   const learned = new Set(p.learned);
+  const start = resumeIndex(lesson.sentences.length, learned);
   let hideKo = !settings.showKo;
   pane.innerHTML = `
     <div class="tools">
@@ -674,7 +678,11 @@ function paneSentences(pane, lesson, p) {
     } else if (act === 'learn') setLearned(i, !learned.has(i));
   });
 
-  player.mount(lesson, (i) => highlight(i, true));
+  player.mount(lesson, (i) => highlight(i, true), start);
+  if (start > 0) {
+    document.getElementById('s' + start)?.scrollIntoView({ block: 'center' });
+    if (announce) toast(`${start + 1}번 문장부터 이어서 공부해요`);
+  }
 }
 
 function highlight(i, scroll) {
@@ -705,18 +713,18 @@ const player = {
   single: false, // 한 문장 반복 중
   onMove: null,
   timer: null,
-  mount(lesson, onMove) {
+  mount(lesson, onMove, startAt = 0) {
     this.stop(true);
     this.lesson = lesson;
     this.onMove = onMove;
-    this.i = 0;
+    this.i = startAt;
     const el = document.createElement('div');
     el.className = 'player';
     el.innerHTML = `
       <button class="icon-btn" data-p="prev" aria-label="이전 문장">${icon.prev}</button>
       <button class="icon-btn main" data-p="toggle" aria-label="연속 재생">${icon.play}</button>
       <button class="icon-btn" data-p="next" aria-label="다음 문장">${icon.next}</button>
-      <div class="info"><b data-p="mode">연속 듣기</b><span data-p="pos">1 / ${lesson.sentences.length}</span></div>
+      <div class="info"><b data-p="mode">연속 듣기</b><span data-p="pos">${this.i + 1} / ${lesson.sentences.length}</span></div>
       <button class="icon-btn ${settings.loopAll ? 'on' : ''}" data-p="loopAll" aria-label="전체 반복" title="전체 반복">${icon.repeat}</button>
       <select data-p="repeat" aria-label="문장마다 반복 횟수" title="문장마다 반복 횟수">
         ${REPEATS.map(([n, l]) => `<option value="${n}" ${settings.repeat == n ? 'selected' : ''}>${l}</option>`).join('')}

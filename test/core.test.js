@@ -6,6 +6,7 @@ import { buildSentences } from '../public/lib/sentences.js';
 import { loadWordData, lemma, levelOf, rankOf, ipaOf } from '../public/lib/words.js';
 import { findExpressions, findTraps } from '../public/lib/expressions.js';
 import { normalizeChannelInput } from '../public/lib/youtube.js';
+import { resumeIndex } from '../public/lib/study.js';
 import { ipaOf as arpabetToIpa } from '../scripts/ipa.mjs';
 import { alignSegments, translateMany, fillMissing, missingCount, setPacing } from '../public/lib/enrich.js';
 import { setTransport } from '../public/lib/net.js';
@@ -208,4 +209,14 @@ test('해석: 한 번 거부당해도 다음번에는 다시 구글로 (잠김 �
   const out = await translateMany(['Nobody tells you.']);
   assert.ok(google > before, '쉬는 시간이 지난 뒤에는 구글에 다시 물어봐야 한다');
   assert.equal(out[0], '번역(Nobody tells you.)');
+});
+
+test('이어보기: 마지막 익힘 다음 문장부터', () => {
+  assert.equal(resumeIndex(272, [0, 1, 2]), 3); // 3번째까지 익혔으면 그다음부터
+  assert.equal(resumeIndex(272, []), 0); // 처음 여는 이야기는 1번부터
+  assert.equal(resumeIndex(10, [0, 4, 2]), 5); // 띄엄띄엄 익혔어도 가장 뒤 익힘의 다음
+  assert.equal(resumeIndex(5, [0, 1, 2, 3, 4]), 0); // 다 익혔으면 처음부터 복습
+  assert.equal(resumeIndex(5, [4]), 0); // 마지막만 익혔으면 아직 안 익힌 첫 문장
+  assert.equal(resumeIndex(5, [0, 4]), 1);
+  assert.equal(resumeIndex(3, new Set([0])), 1); // Set 으로 넘겨도 된다
 });
