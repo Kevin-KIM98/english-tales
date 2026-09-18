@@ -52,3 +52,13 @@ test('채널 주소 해석', () => {
   assert.deepEqual(normalizeChannelInput('UCm1XC5nCMNMUR7c9cYbABQA'), { path: 'channel/UCm1XC5nCMNMUR7c9cYbABQA' });
   assert.throws(() => normalizeChannelInput(''));
 });
+
+test('영상 날짜: 상대 시간 → 날짜', async () => {
+  const { parseRelative } = await import('../public/lib/youtube.js');
+  const now = Date.parse('2026-09-18T00:00:00Z');
+  const day = (t) => new Date(parseRelative(t, now)).toISOString().slice(0, 10);
+  assert.equal(day('3d ago'), '2026-09-15');
+  assert.equal(day('2 weeks ago'), '2026-09-04');
+  assert.equal(day('Streamed 1 month ago'), '2026-08-19');
+  assert.equal(parseRelative('no date', now), null);
+});

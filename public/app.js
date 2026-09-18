@@ -30,7 +30,7 @@ const store = {
 };
 
 const settings = Object.assign(
-  { channel: DEFAULT_CHANNEL, voice: '', rate: 0.95, showKo: true, theme: 'auto', repeat: 1, gap: 0.8, loopAll: false, autoPrepare: true, recentChannels: [] },
+  { channel: DEFAULT_CHANNEL, voice: '', rate: 0.95, showKo: true, theme: 'auto', repeat: 1, gap: 0.8, loopAll: false, autoPrepare: true, sort: 'new', recentChannels: [] },
   store.get('settings', {}),
 );
 const saveSettings = () => store.set('settings', settings);
@@ -154,6 +154,13 @@ async function loadChannel() {
   // '더 불러오기'로 받아 둔 예전 영상은 유지하고, 최신 목록을 앞에 둔다
   const old = channelData?.source === source ? channelData.videos : [];
   const firstIds = new Set(data.videos.map((v) => v.id));
+  // 예전에 정확한 날짜(RSS)를 받아 둔 영상은 그 날짜를 유지
+  const oldById = new Map(old.map((v) => [v.id, v]));
+  for (const v of data.videos) {
+    const o = oldById.get(v.id);
+    if (o?.exact && !v.exact) Object.assign(v, { published: o.published, exact: true });
+    else if (!v.published && o?.published) v.published = o.published;
+  }
   const videos = [...data.videos, ...old.filter((v) => !firstIds.has(v.id))];
   const seen = known[source] ? new Set(known[source]) : null;
   const fresh = seen ? data.videos.filter((v) => !seen.has(v.id)) : [];
@@ -218,6 +225,34 @@ function setRefreshing(on) {
   if (btn) btn.disabled = on;
 }
 
+/** 올린 날짜순 정렬 (settings.sort: 'new' 최신순 | 'old' 오래된순). 날짜를 모르는 영상은 원래 순서대로 뒤에 */
+function sortVideos(videos) {
+  const dir = settings.sort === 'old' ? 1 : -1;
+  return videos
+    .map((v, k) => ({ v, k }))
+    .sort((a, b) => {
+      const pa = a.v.published;
+      const pb = b.v.published;
+      if (pa && pb && pa !== pb) return (pa - pb) * dir;
+      if (!pa !== !pb) return pa ? -1 : 1;
+      return a.k - b.k;
+    })
+    .map((x) => x.v);
+}
+
+/** 날짜 표시: 최근 1주는 'N일 전', 그 외 '9월 15일' (다른 해면 연도 포함, 추정 날짜는 '약') */
+function dateLabel(v) {
+  if (!v.published) return '';
+  const d = new Date(v.published);
+  const days = Math.floor((Date.now() - v.published) / 864e5);
+  if (days < 1 && v.exact) return '오늘';
+  if (days < 7) return `${Math.max(days, 1)}일 전`;
+  const now = new Date();
+  const md = `${d.getMonth() + 1}월 ${d.getDate()}일`;
+  const text = d.getFullYear() === now.getFullYear() ? md : `${d.getFullYear()}년 ${md}`;
+  return v.exact ? text : `약 ${text}`;
+}
+
 function storyStatus(v) {
 
   const p = progress[v.id];
@@ -253,6 +288,10 @@ function renderHome(error) {
       <div class="card stat"><b>${streak()}일</b><span>연속 학습</span></div>
     </div>
     <label class="search">${icon.search}<input id="q" type="search" placeholder="제목으로 찾기" value="${esc(homeFilter)}" aria-label="제목 검색" /></label>
+    <div class="sortbar" role="group" aria-label="정렬">
+      <button data-sort="new" class="${settings.sort !== 'old' ? 'on' : ''}">최신순</button>
+      <button data-sort="old" class="${settings.sort === 'old' ? 'on' : ''}">오래된순</button>
+    </div>
     <h2 class="section"><span>제목별 학습 ${newIds.size ? `<span class="chip new">NEW ${newIds.size}</span>` : ''}</span>
       <button class="btn ghost" id="refresh" style="min-height:32px;padding:0 10px;font-size:12.5px">${icon.refresh.replace('<svg', '<svg style="width:16px;height:16px"')} 새 영상 확인</button></h2>
     <div class="stories" id="stories">${
@@ -262,14 +301,15 @@ function renderHome(error) {
 
   const paint = () => {
     const data = channelData;
-    const list = data.videos.filter((v) => {
+    const sorted = sortVideos(data.videos);
+    const list = sorted.filter((v) => {
       const q = homeFilter.toLowerCase();
       return !q || v.title.toLowerCase().includes(q) || (progress[v.id]?.titleKo || '').includes(homeFilter);
     });
     document.getElementById('stories').innerHTML =
       list
         .map((v) => {
-          const idx = data.videos.indexOf(v) + 1;
+          const idx = sorted.indexOf(v) + 1;
           const s = storyStatus(v);
           const p = progress[v.id];
           const status = jobOf(v.id)
@@ -284,7 +324,7 @@ function renderHome(error) {
             <div>
               <div class="t">${newIds.has(v.id) ? '<span class="chip new">NEW</span> ' : ''}${esc(v.title)}</div>
               ${p?.titleKo ? `<div class="ko">${esc(p.titleKo)}</div>` : ''}
-              <div class="meta">${v.duration ? `<span class="chip">${esc(v.duration)}</span>` : ''}${status}</div>
+              <div class="meta">${dateLabel(v) ? `<span class="chip date">${esc(dateLabel(v))}</span>` : ''}${v.duration ? `<span class="chip">${esc(v.duration)}</span>` : ''}${status}</div>
             </div>
           </a>`;
         })
@@ -317,6 +357,14 @@ function renderHome(error) {
     if (channelData?.source === settings.channel) paint();
   });
   document.getElementById('refresh').addEventListener('click', () => refreshChannel());
+  document.querySelector('.sortbar').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-sort]');
+    if (!b || settings.sort === b.dataset.sort) return;
+    settings.sort = b.dataset.sort;
+    saveSettings();
+    document.querySelectorAll('.sortbar button').forEach((x) => x.classList.toggle('on', x === b));
+    if (channelData?.source === settings.channel) paint();
+  });
   document.getElementById('doUpdate')?.addEventListener('click', () => openDownload(updateInfo.url));
   if (checking) setRefreshing(true);
   if (ch) paint();
@@ -483,6 +531,7 @@ function paneSentences(pane, lesson, p) {
   pane.innerHTML = `
     <div class="tools">
       <button class="btn" id="toggleKo">${icon.eye} <span>${hideKo ? '해석 보기' : '해석 가리기'}</span></button>
+      <button class="btn" id="voicePick" aria-label="영어 목소리 고르기">${icon.speaker} 목소리</button>
       <span class="grow"></span>
       <span class="chip good" id="learnedCount">${learned.size}/${lesson.sentences.length} 익힘</span>
     </div>
@@ -520,6 +569,10 @@ function paneSentences(pane, lesson, p) {
     document.getElementById('learnedCount').textContent = `${learned.size}/${lesson.sentences.length} 익힘`;
   };
 
+  document.getElementById('voicePick').onclick = () => {
+    player.stop();
+    openVoiceSheet();
+  };
   document.getElementById('toggleKo').onclick = (e) => {
     hideKo = !hideKo;
     pane.querySelectorAll('.sent .ko').forEach((k) => k.classList.toggle('hidden', hideKo));
@@ -906,6 +959,74 @@ function paneQuiz(pane, lesson, p) {
 }
 
 /* 단어 시트 (문장 속 단어 탭) */
+/** 영어 목소리 고르기: 억양(지역)별 목록, ▶ 로 미리 듣고 눌러서 선택 */
+const VOICE_SAMPLE = 'Once upon a time, there was a quiet little town by the sea.';
+async function openVoiceSheet(onChange) {
+  closeSheet();
+  const bg = document.createElement('div');
+  bg.className = 'sheet-bg';
+  bg.onclick = () => {
+    tts.stop();
+    closeSheet();
+  };
+  const sheet = document.createElement('div');
+  sheet.className = 'sheet voice-sheet';
+  sheet.setAttribute('role', 'dialog');
+  sheet.setAttribute('aria-label', '영어 목소리 고르기');
+  sheet.innerHTML = `<div class="grab"></div><h3>영어 목소리</h3><div class="skeleton" style="height:160px"></div>`;
+  document.body.append(bg, sheet);
+
+  const groups = await tts.groups();
+  if (!sheet.isConnected) return;
+  const cur = tts.current();
+  sheet.innerHTML = `<div class="grab"></div>
+    <h3>영어 목소리</h3>
+    <p class="muted" style="margin:-4px 0 10px;font-size:13px">▶ 로 미리 들어 보고, 마음에 드는 목소리를 누르세요. <b>고품질</b>은 인터넷 연결 시 더 자연스러워요.</p>
+    <div class="voice-list">
+      ${
+        groups.length
+          ? groups
+              .map(
+                (g) => `<div class="voice-group">${esc(g.regionName)} 영어 <span class="muted">${g.voices.length}</span></div>
+              ${g.voices
+                .map(
+                  (v) => `<div class="voice-row ${cur?.id === v.id ? 'on' : ''}" data-id="${esc(v.id)}">
+                  <button class="voice-pick" data-act="pick">
+                    <span class="radio"></span>
+                    <span class="vname">${esc(v.short)}${v.online ? ' <span class="chip accent">고품질</span>' : ''}</span>
+                  </button>
+                  <button class="icon-btn" data-act="try" aria-label="${esc(v.short)} 미리 듣기">${icon.play}</button>
+                </div>`,
+                )
+                .join('')}`,
+              )
+              .join('')
+          : `<div class="empty">${icon.speaker}<div>이 휴대폰에 영어 음성이 없어요</div></div>`
+      }
+    </div>
+    ${isNative() ? `<button class="btn block" id="vInstall" style="margin-top:12px">목소리 더 받기 (안드로이드 음성 데이터)</button>` : ''}
+    <button class="btn primary block" id="vDone" style="margin-top:8px">완료</button>`;
+
+  sheet.querySelector('.voice-list').addEventListener('click', (e) => {
+    const row = e.target.closest('.voice-row');
+    const act = e.target.closest('[data-act]')?.dataset.act;
+    if (!row || !act) return;
+    const id = row.dataset.id;
+    if (act === 'try') return tts.speak(VOICE_SAMPLE, { voiceId: id });
+    settings.voice = id;
+    saveSettings();
+    sheet.querySelectorAll('.voice-row').forEach((r) => r.classList.toggle('on', r === row));
+    tts.speak(VOICE_SAMPLE);
+    onChange?.();
+    toast(`목소리: ${tts.label(tts.current())}`);
+  });
+  sheet.querySelector('#vInstall')?.addEventListener('click', () => tts.openInstall());
+  sheet.querySelector('#vDone').addEventListener('click', () => {
+    tts.stop();
+    closeSheet();
+  });
+}
+
 function closeSheet() {
   document.querySelectorAll('.sheet, .sheet-bg').forEach((e) => e.remove());
 }
@@ -1071,7 +1192,8 @@ function renderSettings() {
 
     <h2 class="section">발음 (음성)</h2>
     <div class="card form">
-      <div class="row"><div class="label">목소리<small>휴대폰의 영어 음성 중에서 골라요</small></div><select id="voice"><option>불러오는 중…</option></select></div>
+      <div class="row"><div class="label">영어 목소리<small id="voiceName">불러오는 중…</small></div>
+        <button class="btn" id="voiceBtn">${icon.speaker} 목소리 고르기</button></div>
       <div class="row"><div class="label">말하기 속도<small id="rateLabel">${settings.rate.toFixed(2)}배</small></div>
         <input id="rate" type="range" min="0.6" max="1.3" step="0.05" value="${settings.rate}" /></div>
       <div class="row"><div class="label">반복 사이 쉬는 시간<small id="gapLabel">${(settings.gap ?? 0.8).toFixed(1)}초 · 따라 읽을 시간을 주려면 늘리세요</small></div>
@@ -1106,23 +1228,14 @@ function renderSettings() {
 
   const on = (id, ev, fn) => document.getElementById(id)?.addEventListener(ev, fn);
 
-  // 목소리 목록 (안드로이드 TTS 또는 브라우저 음성)
-  tts.voices().then((voices) => {
-    const sel = document.getElementById('voice');
-    if (!sel) return;
-    const cur = tts.current();
-    const sorted = [...voices].sort((a, b) => /US/i.test(b.lang) - /US/i.test(a.lang) || a.name.localeCompare(b.name));
-    sel.innerHTML = sorted.length
-      ? sorted
-          .map((v) => `<option value="${esc(v.id)}" ${cur?.id === v.id ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})${v.local === false ? ' · 고품질' : ''}</option>`)
-          .join('')
-      : '<option>영어 음성 없음 — 음성 데이터를 설치하세요</option>';
-  });
-  on('voice', 'change', (e) => {
-    settings.voice = e.target.value;
-    saveSettings();
-    tts.speak('Once upon a time, there was a quiet little town.');
-  });
+  // 현재 목소리 이름 표시 + 목소리 고르기 창
+  const showVoice = () =>
+    tts.ready().then(() => {
+      const el = document.getElementById('voiceName');
+      if (el) el.textContent = tts.current() ? tts.label(tts.current()) : '영어 음성이 없어요 — 음성 데이터를 설치하세요';
+    });
+  showVoice();
+  on('voiceBtn', 'click', () => openVoiceSheet(showVoice));
   on('rate', 'input', (e) => {
     settings.rate = Number(e.target.value);
     document.getElementById('rateLabel').textContent = settings.rate.toFixed(2) + '배';
