@@ -1,0 +1,13 @@
+{
+  "appId": "io.github.kevinkim98.englishtales",
+  "appName": "English Tales",
+  "webDir": "public",
+  "android": {
+    "backgroundColor": "#12141c"
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": false
+    }
+  }
+}

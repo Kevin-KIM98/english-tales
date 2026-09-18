@@ -1,3 +1,10 @@
 node_modules/
 .env
 data/
+# npm run build 로 생성
+public/data/
+public/build-info.js
+# 서명 키는 절대 저장소에 넣지 않음
+*.p12
+*.jks
+*.keystore

@@ -2,30 +2,29 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
   <title>English Tales</title>
   <meta name="description" content="유튜브 이야기 채널의 자막으로 문장 발음·해석·단어를 공부하는 학습 앱 (휴대폰·PC)" />
   <meta name="theme-color" content="#f5efe3" media="(prefers-color-scheme: light)" />
   <meta name="theme-color" content="#12141c" media="(prefers-color-scheme: dark)" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <link rel="manifest" href="/manifest.webmanifest" />
-  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-  <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icon.svg" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
     href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;0,9..144,700;1,9..144,400&family=Noto+Sans+KR:wght@400;500;700&display=swap"
     rel="stylesheet"
   />
-  <link rel="stylesheet" href="/app.css" />
+  <link rel="stylesheet" href="app.css" />
 </head>
 <body>
   <div id="app" class="app">
     <main id="view" class="view" tabindex="-1"></main>
     <nav class="tabbar" aria-label="주 메뉴">
       <div class="brand" aria-hidden="true">
-        <img src="/icon.svg" alt="" width="36" height="36" />
+        <img src="icon.svg" alt="" width="36" height="36" />
         <div><b>English Tales</b><small>이야기로 배우는 영어</small></div>
       </div>
       <a href="#/" data-nav="home">
@@ -43,6 +42,6 @@
     </nav>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </div>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

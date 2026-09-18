@@ -1,23 +1,30 @@
 {
   "name": "english-tales",
   "version": "1.0.0",
-  "description": "유튜브 채널 자막에서 영어 문장·해석·단어를 추출하는 학습 앱 (휴대폰·PC 공용 PWA)",
+  "description": "유튜브 이야기 채널 자막으로 문장 발음·해석·단어를 공부하는 안드로이드 영어 학습 앱",
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node --env-file-if-exists=.env server/index.js",
-    "pc": "node --env-file-if-exists=.env server/index.js --open",
-    "dev": "node --watch --env-file-if-exists=.env server/index.js",
+    "build": "node scripts/build-data.mjs && node scripts/build-info.mjs",
+    "dev": "npm run build && node dev/server.js",
     "test": "node --test \"test/**/*.test.js\"",
-    "check": "node --check server/index.js && node --check public/app.js && node --check public/sw.js"
+    "check": "node scripts/check.mjs",
+    "android:sync": "npm run build && npx cap sync android"
   },
   "engines": {
     "node": ">=22.9"
   },
-  "dependencies": {
-    "@anthropic-ai/sdk": "latest",
+  "appRepo": "Kevin-KIM98/english-tales",
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.2",
     "cmu-pronouncing-dictionary": "^3.0.0",
-    "msedge-tts": "^2.0.7",
     "subtlex-word-frequencies": "^2.0.0"
+  },
+  "dependencies": {
+    "@capacitor-community/text-to-speech": "^8.0.2",
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/browser": "^8.0.4",
+    "@capacitor/core": "^8.5.2"
   }
 }
