@@ -1,7 +1,7 @@
 // English Tales — 유튜브 이야기 채널 자막으로 공부하는 안드로이드 학습 앱
 // 서버 없이 휴대폰 안에서 채널 목록·자막·해석·단어를 모두 처리한다.
 import { getChannel, getMoreVideos } from './lib/youtube.js';
-import { buildLesson, getLesson, deleteLesson, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
+import { buildLesson, getLesson, refillLesson, missingCount, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
 import { define } from './lib/enrich.js';
 import { createTTS } from './lib/tts.js';
 import { db } from './lib/db.js';
@@ -448,6 +448,15 @@ function titleOf(id) {
   return progress[id]?.title || v?.title || '';
 }
 
+/** '문장 12개 · 단어 뜻 3개가' 처럼 비어 있는 곳을 알려 준다 */
+function missingText(m) {
+  const parts = [];
+  if (m.title) parts.push('제목');
+  if (m.sentences) parts.push(`문장 ${m.sentences}개`);
+  if (m.vocab) parts.push(`단어 뜻 ${m.vocab}개`);
+  return parts.length ? `${parts.join(' · ')} 해석이` : '일부 해석이';
+}
+
 async function renderLesson(id, tab) {
   const token = routeToken;
   const title = titleOf(id);
@@ -484,6 +493,7 @@ async function renderLesson(id, tab) {
   markStudied();
 
   tab = tab || p.lastTab || 'sentences';
+  const gaps = missingCount(lesson); // 저장해 둔 표시 대신 실제로 빈 곳을 센다 (예전 레슨도 다시 채울 수 있게)
   $view.innerHTML = `
     <div class="topbar"><a class="icon-btn" href="#/" aria-label="목록으로">${icon.back}</a><div class="title">${esc(lesson.title)}</div></div>
     <div class="lesson-head">
@@ -491,9 +501,9 @@ async function renderLesson(id, tab) {
       <h1>${esc(lesson.title)}</h1>
       <p>${esc(lesson.titleKo)}</p>
       ${
-        lesson.incomplete
-          ? `<div class="card" style="margin-top:12px;padding:12px 14px;display:flex;gap:10px;align-items:center;font-size:13px">
-              <span class="grow" style="flex:1">번역 서비스가 바빠서 일부 해석이 비어 있어요.</span>
+        gaps.total
+          ? `<div class="card" id="gapCard" style="margin-top:12px;padding:12px 14px;display:flex;gap:10px;align-items:center;font-size:13px">
+              <span class="grow" id="gapMsg" style="flex:1">번역 서비스가 바빠서 ${missingText(gaps)} 비어 있어요.</span>
               <button class="btn" id="regen" style="min-height:36px">해석 다시 받기</button></div>`
           : ''
       }
@@ -510,10 +520,26 @@ async function renderLesson(id, tab) {
     </div>
     <section id="pane"></section>`;
 
-  document.getElementById('regen')?.addEventListener('click', async () => {
-    await deleteLesson(id);
-    lessons.delete(id);
-    route();
+  // 비어 있는 해석만 다시 받는다 — 이미 받아 둔 해석·단어·표현은 그대로 둔다
+  document.getElementById('regen')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const msg = document.getElementById('gapMsg');
+    btn.disabled = true;
+    const show = (t) => msg && (msg.textContent = t);
+    show('해석을 다시 받는 중… 0%');
+    try {
+      const { filled, left } = await refillLesson(id, (p) => show(`해석을 다시 받는 중… ${Math.round(p * 100)}%`));
+      if (token !== routeToken) return;
+      lessons.delete(id);
+      await renderLesson(id, tab);
+      if (token !== routeToken) return;
+      if (!left) toast('해석을 모두 채웠어요.');
+      else toast(filled ? `${filled}군데 채웠어요. ${left}군데는 아직 비어 있어요.` : '번역 서비스가 아직 바빠요. 잠시 뒤 다시 눌러 주세요.');
+    } catch (err) {
+      if (token !== routeToken) return;
+      btn.disabled = false;
+      show(`해석을 받지 못했어요 (${err.message}). 잠시 뒤 다시 눌러 주세요.`);
+    }
   });
 
   const showTab = (k) => {
