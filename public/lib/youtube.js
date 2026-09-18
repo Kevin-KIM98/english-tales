@@ -105,7 +105,7 @@ export async function getChannel(input) {
   const data = extractInitialData(res.text);
   const meta = data.metadata?.channelMetadataRenderer || {};
   const { videos, continuation } = collectVideos(data.contents);
-  await applyExactDates(meta.externalId, videos);
+  await applyFeed(meta.externalId, videos);
   return {
     channelId: meta.externalId || '',
     title: meta.title || path,
@@ -117,17 +117,33 @@ export async function getChannel(input) {
   };
 }
 
-/** 채널 RSS(최근 15편)의 정확한 게시 시각으로 추정 날짜를 바로잡는다 */
-async function applyExactDates(channelId, videos) {
+/**
+ * 채널 RSS(최근 15편)로 정확한 게시 시각과 '진짜 제목'을 채운다.
+ * 채널 페이지 목록은 유튜브 제목 A/B 테스트 때문에 요청할 때마다 다른 실험용 제목이 나올 수 있다.
+ * RSS와 영상 정보(자막을 가져오는 곳)는 항상 원래 제목을 주므로 그것을 기준으로 한다.
+ */
+const decodeXml = (s) =>
+  s.replace(/&(amp|lt|gt|quot|apos|#39|#x27);/g, (_, e) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", '#39': "'", '#x27': "'" })[e]);
+
+async function applyFeed(channelId, videos) {
   if (!channelId) return;
   try {
     const res = await http(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, { timeout: 8000 });
     if (!res.ok) return;
-    const exact = new Map(
-      [...res.text.matchAll(/<yt:videoId>([^<]+)<\/yt:videoId>[\s\S]*?<published>([^<]+)<\/published>/g)].map((m) => [m[1], Date.parse(m[2])]),
-    );
-    for (const v of videos) if (exact.has(v.id)) Object.assign(v, { published: exact.get(v.id), exact: true });
-  } catch {} // RSS가 안 되면 추정 날짜 그대로
+    const feed = new Map();
+    for (const entry of res.text.split('<entry>').slice(1)) {
+      const id = entry.match(/<yt:videoId>([^<]+)<\/yt:videoId>/)?.[1];
+      const title = entry.match(/<title>([^<]*)<\/title>/)?.[1];
+      const published = entry.match(/<published>([^<]+)<\/published>/)?.[1];
+      if (id) feed.set(id, { title: title ? decodeXml(title) : '', published: published ? Date.parse(published) : null });
+    }
+    for (const v of videos) {
+      const f = feed.get(v.id);
+      if (!f) continue;
+      if (f.published) Object.assign(v, { published: f.published, exact: true });
+      if (f.title) Object.assign(v, { title: f.title, titleExact: true });
+    }
+  } catch {} // RSS가 안 되면 목록의 제목·추정 날짜 그대로
 }
 
 export async function getMoreVideos(continuation) {

@@ -62,3 +62,30 @@ test('영상 날짜: 상대 시간 → 날짜', async () => {
   assert.equal(day('Streamed 1 month ago'), '2026-08-19');
   assert.equal(parseRelative('no date', now), null);
 });
+
+test('안드로이드 목소리: 이름이 모두 같아도 목소리마다 다른 표시 이름', async () => {
+  // 안드로이드 TTS 플러그인이 실제로 주는 모양: name 은 전부 같고 voiceURI 가 다르다
+  const android = [
+    ['en-us-x-iol-local', 'en-US', true], ['en-us-x-iol-network', 'en-US', false], ['en-us-x-tpf-network', 'en-US', false],
+    ['en-us-x-sfg-local', 'en-US', true], ['en-US-language', 'en-US', true], ['en-gb-x-rjs-network', 'en-GB', false],
+    ['ko-kr-x-ism-local', 'ko-KR', true],
+  ].map(([voiceURI, lang, localService]) => ({ voiceURI, name: lang.startsWith('ko') ? '한국어 대한민국' : '영어 미국', lang, localService, default: false }));
+  globalThis.Capacitor = {
+    isNativePlatform: () => true,
+    Plugins: { TextToSpeech: { getSupportedVoices: async () => ({ voices: android }), speak: async () => {}, stop: async () => {} } },
+  };
+  try {
+    const { createTTS } = await import('../public/lib/tts.js');
+    const tts = createTTS(() => ({ voice: '', rate: 1 }), () => {});
+    const groups = await tts.groups();
+    const all = groups.flatMap((g) => g.voices);
+    const labels = all.map((v) => tts.label(v));
+    assert.equal(all.length, 6); // 한국어 제외
+    assert.equal(new Set(labels).size, labels.length, '표시 이름이 서로 달라야 함: ' + labels.join(', '));
+    assert.deepEqual(groups.map((g) => g.regionName), ['미국', '영국']);
+    assert.match(tts.label(tts.current()), /^미국 1 · .* \(고품질\)$/); // 기본은 미국 고품질
+    assert.ok(labels.includes('미국 5 · 기본') || labels.some((l) => l.includes('기본')));
+  } finally {
+    delete globalThis.Capacitor;
+  }
+});

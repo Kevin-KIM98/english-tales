@@ -14,9 +14,13 @@ const REGION_ORDER = ['US', 'GB', 'AU', 'CA', 'IE', 'NZ', 'IN', 'ZA'];
 function describe(v) {
   const region = (v.lang.split(/[-_]/)[1] || '').toUpperCase();
   // 구글 음성 이름 예: en-us-x-iol-local / en-us-x-tpf-network / en-US-language
-  const code = v.name.match(/-x-([a-z]+)-(local|network)$/i);
+  const code = v.name.match(/-x-([a-z0-9]+)-(local|network)$/i);
   const online = code ? code[2].toLowerCase() === 'network' : v.local === false;
-  const short = code ? code[1].toUpperCase() : v.name.replace(/^(Microsoft|Google)\s+/i, '').replace(/\s*\(.*\)$/, '');
+  const short = code
+    ? code[1].toUpperCase()
+    : /-language$/i.test(v.name)
+      ? '기본'
+      : v.name.replace(/^(Microsoft|Google)\s+/i, '').replace(/\s*\(.*\)$/, '').replace(/\s+(Online|Natural)$/i, '');
   return { region, regionName: REGIONS[region] || region || '기타', short, online };
 }
 
@@ -28,10 +32,12 @@ export function createTTS(getSettings, toast) {
   async function readVoices() {
     if (isNative() && plugin()) {
       const { voices: list } = await plugin().getSupportedVoices();
-      // 네이티브 플러그인은 전체 목록의 순번(index)으로 목소리를 고른다
+      // 네이티브 플러그인은 전체 목록의 순번(index)으로 목소리를 고른다.
+      // 안드로이드 플러그인의 name 은 모든 목소리가 '영어 미국'처럼 같아서, 목소리마다 다른 voiceURI(en-us-x-iol-network)를 이름으로 쓴다.
+      const seen = new Set();
       return list
-        .map((v, index) => ({ id: String(index), name: v.name, lang: v.lang, local: v.localService }))
-        .filter((v) => /^en[-_]/i.test(v.lang));
+        .map((v, index) => ({ id: String(index), name: v.voiceURI || v.name, lang: v.lang, local: v.localService }))
+        .filter((v) => /^en[-_]/i.test(v.lang) && !seen.has(v.name) && seen.add(v.name));
     }
     if (!('speechSynthesis' in globalThis)) return [];
     const read = () =>
@@ -56,6 +62,13 @@ export function createTTS(getSettings, toast) {
       const list = await readVoices().catch(() => []);
       if (list.length) {
         voices = list.map((v) => ({ ...v, ...describe(v) }));
+        // 지역마다 '고품질 먼저, 이름순'으로 번호를 붙여 목소리를 구별하기 쉽게 한다 (미국 1, 미국 2 …)
+        const byRegion = new Map();
+        for (const v of [...voices].sort((a, b) => b.online - a.online || a.short.localeCompare(b.short))) {
+          const n = (byRegion.get(v.region) || 0) + 1;
+          byRegion.set(v.region, n);
+          v.num = n;
+        }
         return voices;
       }
       await new Promise((r) => setTimeout(r, 700));
@@ -130,7 +143,7 @@ export function createTTS(getSettings, toast) {
     const rank = (r) => (REGION_ORDER.includes(r) ? REGION_ORDER.indexOf(r) : 99);
     return [...map.values()]
       .sort((a, b) => rank(a.region) - rank(b.region) || a.regionName.localeCompare(b.regionName))
-      .map((g) => ({ ...g, voices: g.voices.sort((a, b) => b.online - a.online || a.short.localeCompare(b.short)) }));
+      .map((g) => ({ ...g, voices: g.voices.sort((a, b) => a.num - b.num) }));
   }
 
   return {
@@ -139,8 +152,8 @@ export function createTTS(getSettings, toast) {
     groups,
     /** 현재 목소리 (목록을 아직 못 불러왔으면 undefined) */
     current: () => pick(),
-    /** 화면 표시용 이름: '미국 · IOL (고품질)' */
-    label: (v) => (v ? `${v.regionName} · ${v.short}${v.online ? ' (고품질)' : ''}` : '기본 영어 음성'),
+    /** 화면 표시용 이름: '미국 2 · IOL (고품질)' — 목소리마다 다르게 */
+    label: (v) => (v ? `${v.regionName} ${v.num} · ${v.short}${v.online ? ' (고품질)' : ''}` : '기본 영어 음성'),
     ready: ensure,
     /** 안드로이드 음성 데이터(고품질 음성) 설치 화면 열기 */
     openInstall: () => plugin()?.openInstall?.(),

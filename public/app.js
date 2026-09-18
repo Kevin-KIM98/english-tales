@@ -160,6 +160,8 @@ async function loadChannel() {
     const o = oldById.get(v.id);
     if (o?.exact && !v.exact) Object.assign(v, { published: o.published, exact: true });
     else if (!v.published && o?.published) v.published = o.published;
+    // 한 번 확인한 진짜 제목은 A/B 테스트용 제목으로 덮어쓰지 않는다
+    if (o?.titleExact && !v.titleExact) Object.assign(v, { title: o.title, titleExact: true });
   }
   const videos = [...data.videos, ...old.filter((v) => !firstIds.has(v.id))];
   const seen = known[source] ? new Set(known[source]) : null;
@@ -304,7 +306,7 @@ function renderHome(error) {
     const sorted = sortVideos(data.videos);
     const list = sorted.filter((v) => {
       const q = homeFilter.toLowerCase();
-      return !q || v.title.toLowerCase().includes(q) || (progress[v.id]?.titleKo || '').includes(homeFilter);
+      return !q || displayTitle(v).toLowerCase().includes(q) || v.title.toLowerCase().includes(q) || (progress[v.id]?.titleKo || '').includes(homeFilter);
     });
     document.getElementById('stories').innerHTML =
       list
@@ -322,7 +324,7 @@ function renderHome(error) {
           return `<a class="card story ${s.cls} ${newIds.has(v.id) ? 'is-new' : ''}" href="#/lesson/${v.id}">
             <div class="num">${idx}</div>
             <div>
-              <div class="t">${newIds.has(v.id) ? '<span class="chip new">NEW</span> ' : ''}${esc(v.title)}</div>
+              <div class="t">${newIds.has(v.id) ? '<span class="chip new">NEW</span> ' : ''}${esc(displayTitle(v))}</div>
               ${p?.titleKo ? `<div class="ko">${esc(p.titleKo)}</div>` : ''}
               <div class="meta">${dateLabel(v) ? `<span class="chip date">${esc(dateLabel(v))}</span>` : ''}${v.duration ? `<span class="chip">${esc(v.duration)}</span>` : ''}${status}</div>
             </div>
@@ -410,8 +412,14 @@ async function fetchLesson(id, title, onWait) {
   return lesson;
 }
 
+/** 화면에 보여 줄 제목: 학습 자료(영상 정보의 진짜 제목) > RSS 제목 > 채널 목록 제목 */
+function displayTitle(v) {
+  return progress[v.id]?.title || v.title;
+}
+
 function titleOf(id) {
-  return channelData?.videos.find((v) => v.id === id)?.title || '';
+  const v = channelData?.videos.find((x) => x.id === id);
+  return progress[id]?.title || v?.title || '';
 }
 
 async function renderLesson(id, tab) {
@@ -993,9 +1001,9 @@ async function openVoiceSheet(onChange) {
                   (v) => `<div class="voice-row ${cur?.id === v.id ? 'on' : ''}" data-id="${esc(v.id)}">
                   <button class="voice-pick" data-act="pick">
                     <span class="radio"></span>
-                    <span class="vname">${esc(v.short)}${v.online ? ' <span class="chip accent">고품질</span>' : ''}</span>
+                    <span class="vname">목소리 ${v.num} <span class="muted vcode">${esc(v.short)}</span>${v.online ? ' <span class="chip accent">고품질</span>' : ''}</span>
                   </button>
-                  <button class="icon-btn" data-act="try" aria-label="${esc(v.short)} 미리 듣기">${icon.play}</button>
+                  <button class="icon-btn" data-act="try" aria-label="목소리 ${v.num} 미리 듣기">${icon.play}</button>
                 </div>`,
                 )
                 .join('')}`,
