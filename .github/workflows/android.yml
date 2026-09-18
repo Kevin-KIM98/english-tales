@@ -1,5 +1,7 @@
-# main 에 머지되면: 테스트 → 안드로이드 APK 빌드·서명 → GitHub Release 로 배포
-# 휴대폰 앱은 시작할 때 최신 Release 를 확인해 '업데이트' 를 알려 줍니다.
+# main 에 머지되면: 테스트 → APK 빌드·서명 → 앱 안 업데이트용 코드 묶음(zip) 생성
+#  → GitHub Pages(https://kevin-kim98.github.io/english-tales/)에 설치 페이지·APK·업데이트 파일 배포
+#  → GitHub Release 에도 기록
+# 휴대폰 앱은 Pages 의 update.json 을 보고 앱 안에서 바로 업데이트한다.
 name: Android Release
 
 on:
@@ -9,6 +11,8 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: android-release
@@ -17,6 +21,9 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
     env:
       BUILD_NUMBER: ${{ github.run_number }}
       VERSION_NAME: 1.0.${{ github.run_number }}
@@ -40,6 +47,7 @@ jobs:
           npm run build
           npm run check
           npm test
+          echo "NATIVE_VERSION=$(node -p "require('./package.json').nativeVersion")" >> "$GITHUB_ENV"
 
       - name: 웹 화면을 안드로이드 프로젝트로 복사
         run: npx cap sync android
@@ -64,18 +72,53 @@ jobs:
           APK="$PWD/app/build/outputs/apk/release/app-release.apk"
           test -f "$APK"
           cp "$APK" "$RUNNER_TEMP/english-tales-v$VERSION_NAME.apk"
-          # 이름이 고정된 사본: 설치 QR 코드(releases/latest/download/english-tales.apk)가 항상 최신 버전을 받게 한다
-          cp "$APK" "$RUNNER_TEMP/english-tales.apk"
 
-      - name: GitHub Release 로 배포
+      - name: 설치 페이지 · 업데이트 파일 만들기
+        run: |
+          SITE="$RUNNER_TEMP/site"
+          mkdir -p "$SITE"
+          # 앱 안 업데이트용: 앱 화면·기능 코드 묶음 (zip 안 맨 위에 index.html)
+          (cd public && zip -qr "$SITE/web-$VERSION_NAME.zip" .)
+          cp "$RUNNER_TEMP/english-tales-v$VERSION_NAME.apk" "$SITE/english-tales.apk"
+          cp site/index.html public/icon.svg docs/install-qr.png docs/install-qr-card.png "$SITE/"
+          NOTES=$(git log -1 --format='%s' | head -c 300)
+          APK_MB=$(du -m "$SITE/english-tales.apk" | cut -f1)
+          node -e '
+            const fs = require("fs");
+            fs.writeFileSync(process.argv[1], JSON.stringify({
+              version: process.env.VERSION_NAME,
+              build: Number(process.env.BUILD_NUMBER),
+              native: Number(process.env.NATIVE_VERSION),
+              web: `web-${process.env.VERSION_NAME}.zip`,
+              apk: "english-tales.apk",
+              apkSizeMB: Number(process.argv[3]),
+              notes: process.argv[2],
+              date: new Date().toISOString(),
+            }, null, 2));
+          ' "$SITE/update.json" "$NOTES" "$APK_MB"
+          cat "$SITE/update.json"
+          ls -la "$SITE"
+
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: ${{ runner.temp }}/site
+      - name: GitHub Pages 배포
+        id: pages
+        uses: actions/deploy-pages@v5
+
+      - name: GitHub Release 에 기록
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           NOTES=$(git log -1 --format='%s%n%n%b' | sed '/^Co-Authored-By/d')
-          gh release create "v$VERSION_NAME" "$RUNNER_TEMP/english-tales-v$VERSION_NAME.apk" "$RUNNER_TEMP/english-tales.apk" \
+          gh release create "v$VERSION_NAME" \
+            "$RUNNER_TEMP/english-tales-v$VERSION_NAME.apk" \
+            "$RUNNER_TEMP/site/english-tales.apk" \
+            "$RUNNER_TEMP/site/web-$VERSION_NAME.zip" \
             --title "English Tales $VERSION_NAME" \
             --notes "$NOTES
 
           ### 설치 / 업데이트
-          휴대폰에서 아래 **english-tales-v$VERSION_NAME.apk** 를 눌러 내려받은 뒤 '설치'를 누르세요.
-          이미 설치되어 있다면 앱이 시작할 때 새 버전을 알려 줍니다."
+          - 처음 설치: https://kevin-kim98.github.io/english-tales/ (또는 아래 english-tales.apk)
+          - 이미 설치했다면: 앱 안에서 자동으로 업데이트됩니다."

@@ -5,7 +5,7 @@ import { buildLesson, getLesson, deleteLesson, jobOf, prefetch, onJobsChange } f
 import { define } from './lib/enrich.js';
 import { createTTS } from './lib/tts.js';
 import { db } from './lib/db.js';
-import { checkUpdate, openDownload, appInfo } from './lib/update.js';
+import { checkUpdate, applyUpdate, prepareWebUpdate, markAppReady, appInfo } from './lib/update.js';
 import { isNative } from './lib/net.js';
 
 const DEFAULT_CHANNEL = 'https://www.youtube.com/@ZylosTales';
@@ -142,7 +142,33 @@ const known = store.get('known', {}); // 채널 → 지금까지 본 영상 ID �
 const newIds = new Set(store.get('newIds', [])); // 아직 열어 보지 않은 새 영상
 let lastCheck = 0;
 let checking = null;
-let updateInfo = null;
+let updateInfo = null; // { version, kind: 'web'|'apk', … } 새 버전 정보
+let updateReady = false; // 새 코드를 이미 받아 둠 (다음 실행 때 자동 적용)
+
+/** 업데이트 실행: 웹 코드는 받아서 바로 적용(앱이 새로 뜸), 네이티브 변경은 APK 내려받기 */
+async function runUpdate(btn) {
+  if (!updateInfo) return;
+  const label = btn?.textContent;
+  if (btn) btn.disabled = true;
+  try {
+    if (updateInfo.kind === 'apk') toast('새 설치 파일을 내려받아요. 다 받으면 설치를 누르세요');
+    await applyUpdate(updateInfo, (pct) => btn && (btn.textContent = `받는 중 ${Math.round(pct)}%`));
+  } catch (err) {
+    toast('업데이트하지 못했어요: ' + (err.message || err));
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  }
+}
+
+const updateText = (u) =>
+  u.kind === 'web'
+    ? updateReady
+      ? '새 버전을 받아 두었어요 · 누르면 바로 적용 (다음에 앱을 열 때 자동 적용)'
+      : '누르면 앱 안에서 바로 업데이트돼요'
+    : "새 설치 파일이 필요한 업데이트예요 · 내려받은 뒤 '설치'를 누르세요";
 
 /**
  * 채널의 최신 목록을 가져와 저장된 목록과 합친다.
@@ -272,7 +298,7 @@ function renderHome(error) {
     <div id="ptr" class="ptr" aria-hidden="true">${icon.refresh}</div>
     ${
       updateInfo
-        ? `<div class="card update-banner"><div><b>새 버전 ${esc(updateInfo.version)}</b><small>눌러서 내려받은 뒤 '설치'를 누르세요</small></div>
+        ? `<div class="card update-banner"><div><b>새 버전 ${esc(updateInfo.version)}</b><small>${esc(updateText(updateInfo))}</small></div>
             <button class="btn primary" id="doUpdate">업데이트</button></div>`
         : ''
     }
@@ -367,7 +393,7 @@ function renderHome(error) {
     document.querySelectorAll('.sortbar button').forEach((x) => x.classList.toggle('on', x === b));
     if (channelData?.source === settings.channel) paint();
   });
-  document.getElementById('doUpdate')?.addEventListener('click', () => openDownload(updateInfo.url));
+  document.getElementById('doUpdate')?.addEventListener('click', (e) => runUpdate(e.currentTarget));
   if (checking) setRefreshing(true);
   if (ch) paint();
   else if (!error) refreshChannel();
@@ -1225,7 +1251,7 @@ function renderSettings() {
 
     <h2 class="section">앱 정보 · 데이터</h2>
     <div class="card form">
-      <div class="row"><div class="label">버전 ${esc(appInfo.version)}<small id="updInfo">${updateInfo ? `새 버전 ${esc(updateInfo.version)} 이 있어요` : 'GitHub에서 새 버전을 확인해요'}</small></div>
+      <div class="row"><div class="label">버전 ${esc(appInfo.version)}<small id="updInfo">${updateInfo ? `새 버전 ${esc(updateInfo.version)} · ${esc(updateText(updateInfo))}` : '앱 안에서 새 버전을 확인하고 바로 업데이트해요'}</small></div>
         <button class="btn ${updateInfo ? 'primary' : ''}" id="upd">${updateInfo ? '업데이트' : '업데이트 확인'}</button></div>
       <div class="row"><div class="label">저장된 학습 자료<small id="lessonCount">세는 중…</small></div>
         <button class="btn" id="clearLessons">비우기</button></div>
@@ -1275,14 +1301,14 @@ function renderSettings() {
   });
 
   on('upd', 'click', async (e) => {
-    if (updateInfo) return openDownload(updateInfo.url);
+    if (updateInfo) return runUpdate(e.currentTarget);
     const btn = e.currentTarget;
     btn.disabled = true;
     btn.textContent = '확인 중…';
     try {
       updateInfo = await checkUpdate();
     } catch {}
-    document.getElementById('updInfo').textContent = updateInfo ? `새 버전 ${updateInfo.version} 이 있어요` : '최신 버전이에요';
+    document.getElementById('updInfo').textContent = updateInfo ? `새 버전 ${updateInfo.version} · ${updateText(updateInfo)}` : '최신 버전이에요';
     btn.disabled = false;
     btn.textContent = updateInfo ? '업데이트' : '업데이트 확인';
     btn.classList.toggle('primary', Boolean(updateInfo));
@@ -1424,9 +1450,31 @@ if (isNative() && AppPlugin) {
 route();
 // 앱을 열면 바로 새 영상을 확인 (저장된 목록은 즉시 보여 주고 뒤에서 갱신)
 if (channelData?.source === settings.channel) refreshChannel({ auto: true });
-checkUpdate()
-  .then((u) => {
+
+// 앱이 정상적으로 떴음을 업데이트 기능에 알림 (새 코드가 망가졌으면 이전 버전으로 자동 복구되게)
+markAppReady();
+
+/** 새 버전 확인 → 웹 코드 업데이트면 뒤에서 받아 두고 다음 실행 때 자동 적용 */
+let lastUpdateCheck = 0;
+async function checkForUpdate() {
+  if (Date.now() - lastUpdateCheck < 5 * 60_000) return;
+  lastUpdateCheck = Date.now();
+  try {
+    const u = await checkUpdate();
+    if (!u) return;
+    const changed = updateInfo?.build !== u.build;
     updateInfo = u;
-    if (u && (location.hash.split('/')[1] || '') === '') renderHome();
-  })
-  .catch(() => {});
+    if (changed) updateReady = false;
+    const onHome = () => (location.hash.split('/')[1] || '') === '';
+    if (onHome()) renderHome();
+    if (u.kind === 'web' && !updateReady) {
+      await prepareWebUpdate(u);
+      updateReady = true;
+      if (onHome()) renderHome();
+    }
+  } catch (err) {
+    console.warn('[update]', err.message);
+  }
+}
+checkForUpdate();
+AppPlugin?.addListener('resume', () => checkForUpdate());

@@ -9,7 +9,8 @@ android {
         targetSdkVersion rootProject.ext.targetSdkVersion
         // GitHub Actions 실행 번호가 빌드 번호가 되어, 새 APK가 항상 이전 버전 위에 업데이트로 설치된다
         versionCode Integer.parseInt(System.getenv("BUILD_NUMBER") ?: "1")
-        versionName System.getenv("VERSION_NAME") ?: "1.0.0"
+        // '1.0.12 (n2)': n 뒤 숫자는 네이티브 수준 — 앱이 이 값으로 '앱 안 업데이트'로 충분한지, 새 APK가 필요한지 판단한다
+        versionName (System.getenv("VERSION_NAME") ?: "1.0.0") + " (n" + (System.getenv("NATIVE_VERSION") ?: "0") + ")"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

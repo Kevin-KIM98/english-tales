@@ -8,6 +8,14 @@
   "plugins": {
     "CapacitorHttp": {
       "enabled": false
+    },
+    "CapacitorUpdater": {
+      "autoUpdate": false,
+      "resetWhenUpdate": true,
+      "appReadyTimeout": 15000,
+      "statsUrl": "",
+      "updateUrl": "",
+      "channelUrl": ""
     }
   }
 }
