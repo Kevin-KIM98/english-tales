@@ -4,11 +4,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { buildSentences } from '../public/lib/sentences.js';
 import { loadWordData, lemma, levelOf, rankOf, ipaOf } from '../public/lib/words.js';
-import { findExpressions } from '../public/lib/expressions.js';
+import { findExpressions, findTraps } from '../public/lib/expressions.js';
 import { normalizeChannelInput } from '../public/lib/youtube.js';
+import { resumeIndex } from '../public/lib/study.js';
 import { ipaOf as arpabetToIpa } from '../scripts/ipa.mjs';
 import { alignSegments, translateMany, fillMissing, missingCount, setPacing } from '../public/lib/enrich.js';
 import { setTransport } from '../public/lib/net.js';
+import { llmTranslate, setEngine, engineReady, checkKey } from '../public/lib/llm.js';
 
 before(async () => {
   // npm run build 로 만든 오프라인 데이터를 읽는다
@@ -130,8 +132,8 @@ test('해석: 조각을 원래 줄에 맞춰 나눈다', () => {
 });
 
 test('해석: 묶음이 거부당하면 반으로 쪼개 되살린다', async (t) => {
-  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0 });
-  t.after(() => (setTransport(null), setPacing({ gap: 350, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000 })));
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0, budget: 0 });
+  t.after(() => (setTransport(null), setPacing({ gap: 120, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000, budget: 30000, lanes: 3 })));
   const lines = Array.from({ length: 8 }, (_, i) => `Sentence number ${i}.`);
   // 4줄이 넘는 요청은 모두 거부 → 쪼개서 받아 와야 한다
   const calls = fakeNet((qLines) => (qLines.length > 4 ? 429 : 200));
@@ -142,8 +144,8 @@ test('해석: 묶음이 거부당하면 반으로 쪼개 되살린다', async (t
 });
 
 test('해석: Google 이 안 되면 남은 줄만 두 번째 번역기로', async (t) => {
-  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0 });
-  t.after(() => (setTransport(null), setPacing({ gap: 350, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000 })));
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0, budget: 0 });
+  t.after(() => (setTransport(null), setPacing({ gap: 120, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000, budget: 30000, lanes: 3 })));
   const calls = fakeNet((qLines, n, who) => (who === 'google' ? 429 : 200));
   const out = await translateMany(['It is not loud.', 'Nobody tells you.']);
   assert.equal(out.failed, 0);
@@ -152,8 +154,8 @@ test('해석: Google 이 안 되면 남은 줄만 두 번째 번역기로', asyn
 });
 
 test('해석 다시 받기: 비어 있는 곳만 다시 받고 있던 해석은 그대로', async (t) => {
-  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0 });
-  t.after(() => (setTransport(null), setPacing({ gap: 350, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000 })));
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0, budget: 0 });
+  t.after(() => (setTransport(null), setPacing({ gap: 120, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000, budget: 30000, lanes: 3 })));
   const lesson = {
     title: 'A Story About Falling Behind',
     titleKo: '뒤처짐에 관한 이야기',
@@ -174,4 +176,133 @@ test('해석 다시 받기: 비어 있는 곳만 다시 받고 있던 해석은 
   assert.equal(lesson.sentences[1].ko, '번역(Nobody tells you.)');
   assert.equal(lesson.vocab[0].ko, '번역(panic)');
   assert.ok(!calls.some((q) => q.includes('It is not loud.')));
+});
+
+test('직역하면 뜻이 달라지는 표현 짚어 주기', () => {
+  // 무료 번역기는 이 문장을 '문을 닫은 채 학교에 다닌 사람'으로 옮긴다
+  const t = findTraps('Someone you went to school with just closed on a house.');
+  assert.equal(t.length, 1);
+  assert.equal(t[0].phrase, 'close on a house');
+  assert.match(t[0].ko, /매매/);
+  // 관사가 달라도, 활용형이어도 찾는다
+  assert.equal(findTraps('She is closing on the house next week.')[0]?.phrase, 'close on a house');
+  assert.equal(findTraps('He kept his head above water for a year.')[0]?.phrase, 'keep your head above water');
+  // 평범한 문장에는 아무것도 붙이지 않는다
+  assert.deepEqual(findTraps('It is not loud.'), []);
+});
+
+test('해석: 한 번 거부당해도 다음번에는 다시 구글로 (잠김 없음)', async (t) => {
+  setPacing({ gap: 0, retry: 0, cooldowns: [30], maxWait: 1000, budget: 0, lanes: 2 });
+  t.after(() => (setTransport(null), setPacing({ gap: 120, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000, budget: 30000, lanes: 3 })));
+  let refuse = true;
+  let google = 0;
+  fakeNet((qLines, n, who) => {
+    if (who !== 'google') return 200;
+    google++;
+    return refuse ? 429 : 200;
+  });
+  await translateMany(['It is not loud.']); // 거부당해 두 번째 번역기로 넘어간다
+  assert.ok(google > 0);
+
+  refuse = false;
+  const before = google;
+  await new Promise((r) => setTimeout(r, 80)); // 쉬는 시간이 지나면
+  const out = await translateMany(['Nobody tells you.']);
+  assert.ok(google > before, '쉬는 시간이 지난 뒤에는 구글에 다시 물어봐야 한다');
+  assert.equal(out[0], '번역(Nobody tells you.)');
+});
+
+test('이어보기: 마지막 익힘 다음 문장부터', () => {
+  assert.equal(resumeIndex(272, [0, 1, 2]), 3); // 3번째까지 익혔으면 그다음부터
+  assert.equal(resumeIndex(272, []), 0); // 처음 여는 이야기는 1번부터
+  assert.equal(resumeIndex(10, [0, 4, 2]), 5); // 띄엄띄엄 익혔어도 가장 뒤 익힘의 다음
+  assert.equal(resumeIndex(5, [0, 1, 2, 3, 4]), 0); // 다 익혔으면 처음부터 복습
+  assert.equal(resumeIndex(5, [4]), 0); // 마지막만 익혔으면 아직 안 익힌 첫 문장
+  assert.equal(resumeIndex(5, [0, 4]), 1);
+  assert.equal(resumeIndex(3, new Set([0])), 1); // Set 으로 넘겨도 된다
+});
+
+/* ── 해석 엔진 (LLM) ── */
+const isLlm = (url) => url.startsWith('https://generativelanguage.googleapis.com');
+const geminiReply = (items) => ({
+  status: 200,
+  text: JSON.stringify({ candidates: [{ content: { parts: [{ text: '```json\n' + JSON.stringify(items) + '\n```' }] } }] }),
+});
+/** 프롬프트에 담긴 '1. 문장' 목록을 읽어 낸다 */
+const askedLines = (body) => {
+  const text = JSON.parse(body).contents[0].parts[0].text;
+  return [...text.matchAll(/^(\d+)\. (.+)$/gm)].map((m) => ({ n: Number(m[1]), line: m[2] }));
+};
+
+test('해석 엔진: 번호로 맞춰 문맥 번역을 받는다', async (t) => {
+  t.after(() => (setTransport(null), setEngine({})));
+  setEngine({ on: true, key: 'test-key', model: 'gemini-flash-lite-latest' });
+  assert.equal(engineReady(), true);
+  const seen = [];
+  setTransport(async (url, { body }) => {
+    assert.ok(isLlm(url));
+    seen.push(url);
+    // 순서를 섞어 돌려줘도 번호로 제자리를 찾아야 한다
+    return geminiReply(askedLines(body).map(({ n, line }) => ({ n, ko: `엘엘엠(${line})` })).reverse());
+  });
+  const out = await llmTranslate(['It is not loud.', 'Nobody tells you.'], { title: 'A Story' });
+  assert.deepEqual(out, ['엘엘엠(It is not loud.)', '엘엘엠(Nobody tells you.)']);
+  assert.match(seen[0], /gemini-flash-lite-latest:generateContent\?key=test-key/);
+});
+
+test('해석 엔진: LLM 이 빠뜨린 줄만 무료 번역기가 채운다', async (t) => {
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0, budget: 0 });
+  t.after(() => (setTransport(null), setEngine({}), setPacing({ gap: 120, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000, budget: 30000, lanes: 3 })));
+  setEngine({ on: true, key: 'k' });
+  let google = 0;
+  setTransport(async (url, { body }) => {
+    if (isLlm(url)) {
+      const asked = askedLines(body);
+      return geminiReply([{ n: asked[0].n, ko: `엘엘엠(${asked[0].line})` }]); // 첫 줄만 돌려준다
+    }
+    google++;
+    const q = decodeURIComponent(new URL(url).searchParams.get('q'));
+    if (url.startsWith('https://api.mymemory')) return { status: 200, text: JSON.stringify({ responseData: { translatedText: `메모리(${q})` } }) };
+    const src = q.split('\n');
+    return { status: 200, text: JSON.stringify([src.map((l, k) => [`번역(${l})` + (k < src.length - 1 ? '\n' : ''), l + (k < src.length - 1 ? '\n' : '')]), null, 'en']) };
+  });
+  const out = await translateMany(['It is not loud.', 'Nobody tells you.'], () => {}, { title: 'A Story' });
+  assert.equal(out.failed, 0);
+  assert.equal(out[0], '엘엘엠(It is not loud.)'); // LLM 해석은 그대로 두고
+  assert.equal(out[1], '번역(Nobody tells you.)'); // 빠진 줄만 무료 번역기로
+  assert.equal(google, 1);
+});
+
+test('해석 엔진: 꺼져 있으면 LLM 에 보내지 않는다', async (t) => {
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0, budget: 0 });
+  t.after(() => (setTransport(null), setEngine({}), setPacing({ gap: 120, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000, budget: 30000, lanes: 3 })));
+  setEngine({ on: false, key: 'k' });
+  setTransport(async (url) => {
+    assert.ok(!isLlm(url), 'LLM 을 껐는데 요청이 나갔다');
+    const q = decodeURIComponent(new URL(url).searchParams.get('q'));
+    const src = q.split('\n');
+    return { status: 200, text: JSON.stringify([src.map((l) => [`번역(${l})`, l]), null, 'en']) };
+  });
+  const out = await translateMany(['It is not loud.']);
+  assert.equal(out[0], '번역(It is not loud.)');
+});
+
+test('해석 엔진: 키 확인은 쓸 수 있는 모델을 골라 준다', async (t) => {
+  t.after(() => (setTransport(null), setEngine({})));
+  setTransport(async (url) => {
+    assert.match(url, /\/models\?key=my-key/);
+    return {
+      status: 200,
+      text: JSON.stringify({
+        models: [
+          { name: 'models/embedding-001', supportedGenerationMethods: ['embedContent'] },
+          { name: 'models/gemini-flash-latest', supportedGenerationMethods: ['generateContent'] },
+          { name: 'models/gemini-flash-lite-latest', supportedGenerationMethods: ['generateContent'] },
+        ],
+      }),
+    };
+  });
+  const { models, picked } = await checkKey('my-key');
+  assert.equal(picked, 'gemini-flash-lite-latest'); // 무료 한도가 넉넉한 쪽을 고른다
+  assert.deepEqual(models, ['gemini-flash-latest', 'gemini-flash-lite-latest']);
 });

@@ -1,11 +1,14 @@
 // English Tales — 유튜브 이야기 채널 자막으로 공부하는 안드로이드 학습 앱
 // 서버 없이 휴대폰 안에서 채널 목록·자막·해석·단어를 모두 처리한다.
 import { getChannel, getMoreVideos } from './lib/youtube.js';
-import { buildLesson, getLesson, refillLesson, missingCount, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
+import { buildLesson, getLesson, refillLesson, upgradeLesson, missingCount, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
 import { define } from './lib/enrich.js';
+import { findTraps } from './lib/expressions.js';
+import { resumeIndex } from './lib/study.js';
+import { setEngine, engineReady, checkKey, KEY_HELP } from './lib/llm.js';
 import { createTTS } from './lib/tts.js';
 import { db } from './lib/db.js';
-import { checkUpdate, applyUpdate, prepareWebUpdate, markAppReady, appInfo } from './lib/update.js';
+import { checkUpdate, applyUpdate, prepareWebUpdate, markAppReady, appInfo, openDownload } from './lib/update.js';
 import { isNative } from './lib/net.js';
 
 const DEFAULT_CHANNEL = 'https://www.youtube.com/@ZylosTales';
@@ -30,10 +33,16 @@ const store = {
 };
 
 const settings = Object.assign(
-  { channel: DEFAULT_CHANNEL, voice: '', rate: 0.95, showKo: true, theme: 'auto', repeat: 1, gap: 0.8, loopAll: false, autoPrepare: true, sort: 'new', recentChannels: [] },
+  { channel: DEFAULT_CHANNEL, voice: '', rate: 0.95, showKo: true, theme: 'auto', repeat: 1, gap: 0.8, loopAll: false, autoPrepare: true, sort: 'new', recentChannels: [], llmOn: false, llmKey: '', llmModel: '' },
   store.get('settings', {}),
 );
-const saveSettings = () => store.set('settings', settings);
+const saveSettings = () => {
+  store.set('settings', settings);
+  applyEngine();
+};
+// 해석 엔진(LLM) 설정을 번역 쪽에 알려 준다 — 키는 이 휴대폰에만 저장된다
+const applyEngine = () => setEngine({ on: settings.llmOn, key: settings.llmKey, model: settings.llmModel });
+applyEngine();
 // 학습 기록은 이 휴대폰에 저장된다
 const progress = store.get('progress', {}); // videoId → { titleKo, total, learned: [], quiz, lastTab, t }
 const words = store.get('words', {}); // word → { ...vocab, videoId, addedAt, known, t } | { deleted: true, t }
@@ -507,6 +516,13 @@ async function renderLesson(id, tab) {
               <button class="btn" id="regen" style="min-height:36px">해석 다시 받기</button></div>`
           : ''
       }
+      ${
+        engineReady() && lesson.engine === 'basic'
+          ? `<div class="card" id="upCard" style="margin-top:12px;padding:12px 14px;display:flex;gap:10px;align-items:center;font-size:13px">
+              <span class="grow" id="upMsg" style="flex:1">이 이야기는 무료 번역기로 해석했어요. LLM 으로 다시 해석하면 더 자연스러워져요.</span>
+              <button class="btn" id="upgrade" style="min-height:36px">다시 해석</button></div>`
+          : ''
+      }
     </div>
     <div class="tabs" role="tablist">
       ${[
@@ -526,9 +542,10 @@ async function renderLesson(id, tab) {
     const msg = document.getElementById('gapMsg');
     btn.disabled = true;
     const show = (t) => msg && (msg.textContent = t);
-    show('해석을 다시 받는 중… 0%');
+    const step = (p) => show(`해석을 다시 받는 중… ${Math.min(gaps.total, Math.round(p * gaps.total))}/${gaps.total}`);
+    step(0);
     try {
-      const { filled, left } = await refillLesson(id, (p) => show(`해석을 다시 받는 중… ${Math.round(p * 100)}%`));
+      const { filled, left } = await refillLesson(id, step);
       if (token !== routeToken) return;
       lessons.delete(id);
       await renderLesson(id, tab);
@@ -542,6 +559,28 @@ async function renderLesson(id, tab) {
     }
   });
 
+  let firstPane = true; // 레슨을 연 직후 한 번만 '이어서 공부해요' 안내
+  // 무료 번역기로 만든 이야기를 해석 엔진(LLM)으로 다시 해석
+  document.getElementById('upgrade')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const msg = document.getElementById('upMsg');
+    btn.disabled = true;
+    const show = (t) => msg && (msg.textContent = t);
+    const total = lesson.sentences.length;
+    show('다시 해석하는 중… 0/' + total);
+    try {
+      await upgradeLesson(id, (p) => show(`다시 해석하는 중… ${Math.min(total, Math.round(p * total))}/${total}`));
+      if (token !== routeToken) return;
+      lessons.delete(id);
+      await renderLesson(id, tab);
+      if (token === routeToken) toast('LLM 해석으로 바꿨어요');
+    } catch (err) {
+      if (token !== routeToken) return;
+      btn.disabled = false;
+      show(`다시 해석하지 못했어요 (${err.message})`);
+    }
+  });
+
   const showTab = (k) => {
     player.stop(true);
     tts.stop();
@@ -552,10 +591,11 @@ async function renderLesson(id, tab) {
       b.setAttribute('aria-selected', b.dataset.tab === k);
     });
     const pane = document.getElementById('pane');
-    if (k === 'sentences') paneSentences(pane, lesson, p);
+    if (k === 'sentences') paneSentences(pane, lesson, p, firstPane);
     else if (k === 'vocab') paneVocab(pane, lesson);
     else if (k === 'expressions') paneExpressions(pane, lesson);
     else paneQuiz(pane, lesson, p);
+    firstPane = false;
   };
   document.querySelector('.tabs').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-tab]');
@@ -577,6 +617,13 @@ function vocabFor(lesson, token) {
   });
 }
 
+/** 무료 번역기가 직역해 버리는 표현은 문장 아래에 뜻을 따로 짚어 준다 */
+function tipsHTML(en) {
+  return findTraps(en)
+    .map((t) => `<div class="tip"><b>${esc(t.phrase)}</b> ${esc(t.ko)}</div>`)
+    .join('');
+}
+
 function sentenceHTML(lesson, s) {
   return s.en
     .split(/\s+/)
@@ -585,8 +632,9 @@ function sentenceHTML(lesson, s) {
 }
 
 /* 문장 탭 */
-function paneSentences(pane, lesson, p) {
+function paneSentences(pane, lesson, p, announce) {
   const learned = new Set(p.learned);
+  const start = resumeIndex(lesson.sentences.length, learned);
   let hideKo = !settings.showKo;
   pane.innerHTML = `
     <div class="tools">
@@ -606,6 +654,7 @@ function paneSentences(pane, lesson, p) {
           <div class="no"><span>${String(s.i + 1).padStart(2, '0')}</span><span class="check">${learned.has(s.i) ? '✓ 익힘' : ''}</span></div>
           <div class="en">${sentenceHTML(lesson, s)}</div>
           <div class="ko ${hideKo ? 'hidden' : ''}">${esc(s.ko)}</div>
+          ${tipsHTML(s.en)}
           <div class="actions">
             <button class="icon-btn" data-act="play" aria-label="듣기">${icon.speaker}</button>
             <button class="icon-btn" data-act="slow" aria-label="천천히 듣기">${icon.slow}</button>
@@ -635,7 +684,7 @@ function paneSentences(pane, lesson, p) {
   };
   document.getElementById('toggleKo').onclick = (e) => {
     hideKo = !hideKo;
-    pane.querySelectorAll('.sent .ko').forEach((k) => k.classList.toggle('hidden', hideKo));
+    pane.querySelectorAll('.sent .ko, .sent .tip').forEach((k) => k.classList.toggle('hidden', hideKo));
     e.currentTarget.querySelector('span').textContent = hideKo ? '해석 보기' : '해석 가리기';
   };
 
@@ -664,7 +713,11 @@ function paneSentences(pane, lesson, p) {
     } else if (act === 'learn') setLearned(i, !learned.has(i));
   });
 
-  player.mount(lesson, (i) => highlight(i, true));
+  player.mount(lesson, (i) => highlight(i, true), start);
+  if (start > 0) {
+    document.getElementById('s' + start)?.scrollIntoView({ block: 'center' });
+    if (announce) toast(`${start + 1}번 문장부터 이어서 공부해요`);
+  }
 }
 
 function highlight(i, scroll) {
@@ -695,18 +748,18 @@ const player = {
   single: false, // 한 문장 반복 중
   onMove: null,
   timer: null,
-  mount(lesson, onMove) {
+  mount(lesson, onMove, startAt = 0) {
     this.stop(true);
     this.lesson = lesson;
     this.onMove = onMove;
-    this.i = 0;
+    this.i = startAt;
     const el = document.createElement('div');
     el.className = 'player';
     el.innerHTML = `
       <button class="icon-btn" data-p="prev" aria-label="이전 문장">${icon.prev}</button>
       <button class="icon-btn main" data-p="toggle" aria-label="연속 재생">${icon.play}</button>
       <button class="icon-btn" data-p="next" aria-label="다음 문장">${icon.next}</button>
-      <div class="info"><b data-p="mode">연속 듣기</b><span data-p="pos">1 / ${lesson.sentences.length}</span></div>
+      <div class="info"><b data-p="mode">연속 듣기</b><span data-p="pos">${this.i + 1} / ${lesson.sentences.length}</span></div>
       <button class="icon-btn ${settings.loopAll ? 'on' : ''}" data-p="loopAll" aria-label="전체 반복" title="전체 반복">${icon.repeat}</button>
       <select data-p="repeat" aria-label="문장마다 반복 횟수" title="문장마다 반복 횟수">
         ${REPEATS.map(([n, l]) => `<option value="${n}" ${settings.repeat == n ? 'selected' : ''}>${l}</option>`).join('')}
@@ -891,8 +944,8 @@ function paneVocab(pane, lesson) {
 /* 표현 탭 */
 function paneExpressions(pane, lesson) {
   if (!lesson.expressions.length) {
-    pane.innerHTML = `<div class="empty">${icon.book}<div>표현 해설은 Claude 해석 엔진에서 제공돼요.</div>
-      <div style="font-size:12.5px;margin-top:6px">서버 .env에 ANTHROPIC_API_KEY를 넣고 레슨을 다시 만들어 보세요.</div></div>`;
+    pane.innerHTML = `<div class="empty">${icon.book}<div>이 이야기에서는 찾은 표현이 없어요.</div>
+      <div style="font-size:12.5px;margin-top:6px">구동사·관용 표현이 나오면 여기에 뜻과 예문이 모입니다.</div></div>`;
     return;
   }
   pane.innerHTML = `<div class="vocab-list">${lesson.expressions
@@ -1250,6 +1303,22 @@ function renderSettings() {
         <button class="btn" id="checkNow">${icon.refresh} 새 영상 확인</button></div>
     </div>
 
+    <h2 class="section">해석 엔진</h2>
+    <div class="card form">
+      <div class="row"><div class="label">LLM 으로 해석<small>이야기 제목과 앞뒤 문장을 함께 보고 번역해요. 관용 표현·말투가 훨씬 자연스러워집니다.</small></div>
+        <label class="switch"><input id="llmOn" type="checkbox" ${settings.llmOn ? 'checked' : ''} /><span></span></label></div>
+      <div class="row"><div class="label" style="flex:1"><label for="llmKey">Gemini API 키</label>
+          <small>무료로 발급받아 쓰는 키예요 · 이 휴대폰에만 저장됩니다</small>
+          <input id="llmKey" type="password" inputmode="text" autocapitalize="off" autocomplete="off" spellcheck="false"
+            placeholder="AIza…" value="${esc(settings.llmKey)}" aria-label="Gemini API 키" style="width:100%;margin-top:8px" /></div></div>
+      <div class="row"><div class="label">키 확인<small id="llmState">${settings.llmModel ? '사용할 모델 ' + esc(settings.llmModel) : '키를 넣고 확인을 눌러 주세요'}</small></div>
+        <button class="btn" id="llmCheck">확인</button></div>
+      <div class="row"><div class="label">키 발급<small>Google AI Studio 에서 무료로 만들 수 있어요</small></div>
+        <button class="btn" id="llmHelp">발급 방법</button></div>
+    </div>
+    <p class="muted" style="font-size:12.5px;margin:8px 4px 0">켜면 학습할 <b>문장이 Google 서버로 전송</b>돼 번역됩니다.
+      무료 한도를 넘기면 자동으로 무료 번역기로 돌아가므로 해석이 비지 않아요.</p>
+
     <h2 class="section">발음 (음성)</h2>
     <div class="card form">
       <div class="row"><div class="label">영어 목소리<small id="voiceName">불러오는 중…</small></div>
@@ -1317,6 +1386,39 @@ function renderSettings() {
     saveSettings();
     applyTheme();
   });
+  on('llmOn', 'change', (e) => {
+    settings.llmOn = e.target.checked;
+    saveSettings();
+    if (settings.llmOn && !settings.llmKey) toast('Gemini API 키를 넣어야 켜져요');
+    else toast(settings.llmOn ? 'LLM 해석을 켰어요 · 다음에 만드는 이야기부터 적용돼요' : 'LLM 해석을 껐어요');
+  });
+  on('llmKey', 'change', (e) => {
+    settings.llmKey = e.target.value.trim();
+    settings.llmModel = ''; // 키가 바뀌면 모델도 다시 고른다
+    saveSettings();
+  });
+  on('llmCheck', 'click', async (e) => {
+    const key = document.getElementById('llmKey').value.trim();
+    const state = document.getElementById('llmState');
+    const btn = e.currentTarget;
+    if (!key) return (state.textContent = '키를 먼저 넣어 주세요');
+    btn.disabled = true;
+    state.textContent = '확인하는 중…';
+    try {
+      const { models, picked } = await checkKey(key);
+      Object.assign(settings, { llmKey: key, llmModel: picked, llmOn: true });
+      saveSettings();
+      document.getElementById('llmOn').checked = true;
+      state.textContent = `사용할 모델 ${picked} · 쓸 수 있는 모델 ${models.length}개`;
+      toast('키를 확인했어요 · LLM 해석을 켰습니다');
+    } catch (err) {
+      state.textContent = `확인 실패: ${err.message}`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  on('llmHelp', 'click', () => openDownload(KEY_HELP));
+
   on('autoPrepare', 'change', (e) => {
     settings.autoPrepare = e.target.checked;
     saveSettings();

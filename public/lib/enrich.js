@@ -3,6 +3,7 @@
 // 단어·발음기호·난이도·표현: 앱에 들어 있는 오프라인 데이터
 
 import { http } from './net.js';
+import { llmTranslate, engineReady, engineModel } from './llm.js';
 import { COMMON_WORDS } from './common-words.js';
 import { findExpressions } from './expressions.js';
 import { loadWordData, rankOf, lemma, levelOf, ipaOf } from './words.js';
@@ -28,16 +29,18 @@ async function mapLimit(items, limit, fn) {
 /* ── 번역 ──
    무료 공개 번역 엔드포인트는 요청이 몰리면 잠시 거부(429)한다. 한 번 거부당했다고
    해석이 통째로 비지 않도록 네 겹으로 막는다.
-   ① 앱 전체에서 번역 요청을 한 줄로 세워 간격을 두고 보낸다 (레슨 여러 개를 동시에 만들 때 특히 중요)
+   ① 서비스별로 요청 줄을 세워 보낸다 — 잘 될 때는 여러 개를 나란히, 거부당한 뒤에는 하나씩 천천히
    ② 거부당하면 잠깐 쉬었다가 다시 보낸다
    ③ 묶음이 실패하면 반으로 쪼개 되살린다
    ④ 그래도 빈 줄만 두 번째 번역기(MyMemory)로 채운다 */
 const pace = {
-  gap: 350, // 요청 사이 최소 간격
+  lanes: 3, // 잘 될 때 동시에 보내는 요청 수
+  gap: 120, // 잘 될 때 요청 사이 간격
+  slowGap: 500, // 거부당한 뒤 요청 사이 간격 (이때는 한 번에 하나씩)
   retry: 600, // 실패 후 다시 보내기까지 (시도할수록 길어진다)
   cooldowns: [4000, 12000, 25000], // 거부를 연달아 맞을 때 쉬는 시간
   maxWait: 30000, // 한 번에 기다려 주는 최대 시간 (이보다 길면 기다리지 않고 넘어간다)
-  budget: 60000, // 거부가 이어질 때 쉬어 주는 시간의 총합 (넘으면 기다리지 않고 두 번째 번역기로)
+  budget: 30000, // 한 번 받아 오는 동안 거부를 기다려 주는 시간 (넘으면 기다리지 않고 두 번째 번역기로)
 };
 /** 테스트에서 기다리는 시간을 줄일 때만 쓴다 */
 export function setPacing(patch) {
@@ -49,25 +52,51 @@ const SPLIT_DEPTH = 4; // 실패한 묶음을 반으로 쪼개 보는 횟수
 const MYMEMORY_MAX = 80; // 두 번째 번역기는 하루 한도가 작아 조금만 쓴다
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const gate = { chain: Promise.resolve(), last: 0, restUntil: 0, strikes: 0, waited: 0 };
+const gate = { restUntil: 0, strikes: 0 };
+/** 거부당한 적 없이 잘 돌아가는 중인가 */
+const healthy = () => gate.strikes === 0 && gate.restUntil <= Date.now();
 
-/** 번역 요청을 앱 전체에서 한 줄로 세워 보낸다 */
-function queued(fn) {
-  const run = gate.chain.then(async () => {
-    const wait = gate.last + pace.gap - Date.now();
-    if (wait > 0) await sleep(wait);
-    try {
-      return await fn();
-    } finally {
-      gate.last = Date.now();
+/**
+ * 한 서비스로 가는 요청 줄. 동시 요청 수와 간격을 상황에 따라 정한다.
+ * (잘 될 때는 나란히 보내 빠르게, 거부당한 뒤에는 하나씩 천천히)
+ */
+function makeLane(limit, gapOf) {
+  const st = { active: 0, last: 0, waiting: [], timer: 0 };
+  const pump = () => {
+    while (st.waiting.length && st.active < limit()) {
+      const wait = st.last + gapOf() - Date.now();
+      if (wait > 0) {
+        if (!st.timer) st.timer = setTimeout(() => ((st.timer = 0), pump()), wait);
+        return;
+      }
+      const job = st.waiting.shift();
+      st.active++;
+      st.last = Date.now();
+      Promise.resolve()
+        .then(job.run)
+        .then(job.ok, job.fail)
+        .finally(() => {
+          st.active--;
+          pump();
+        });
     }
-  });
-  gate.chain = run.then(
-    () => {},
-    () => {},
-  );
-  return run;
+  };
+  return (run) =>
+    new Promise((ok, fail) => {
+      st.waiting.push({ run, ok, fail });
+      pump();
+    });
 }
+
+// 번역기마다 따로 줄을 세운다 (한쪽이 느려도 다른 쪽은 기다리지 않는다)
+const gtxLane = makeLane(
+  () => (healthy() ? pace.lanes : 1),
+  () => (healthy() ? pace.gap : pace.slowGap),
+);
+const mmLane = makeLane(
+  () => pace.lanes,
+  () => pace.gap,
+);
 
 /** 거부(429·503)당하면 점점 더 오래 쉰다 — 다른 번역 요청도 함께 기다린다 */
 function rest(status) {
@@ -78,7 +107,7 @@ function rest(status) {
 
 async function gtxOnce(text) {
   const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=' + encodeURIComponent(text);
-  const res = await queued(() => http(url, { timeout: 12000 }));
+  const res = await gtxLane(() => http(url, { timeout: 12000 }));
   if (!res.ok) {
     rest(res.status);
     throw Object.assign(new Error(`번역 요청 실패 (${res.status})`), { status: res.status });
@@ -91,19 +120,24 @@ async function gtxOnce(text) {
   }
   if (!Array.isArray(segs)) throw new Error('번역 응답을 읽지 못했습니다');
   gate.strikes = 0;
-  gate.waited = 0;
   return segs;
 }
 
-/** 번역 조각 [번역, 원문] 목록을 받는다. 거부당하면 쉬었다 다시 */
-async function gtx(text, tries = 3) {
+/**
+ * 번역 조각 [번역, 원문] 목록을 받는다. 거부당하면 쉬었다 다시.
+ * @param {{ waitUntil: number }} run 이번에 받아 오는 동안 기다려 줄 시각 (넘으면 기다리지 않는다)
+ */
+async function gtx(text, run, tries = 3) {
   for (let n = 1; ; n++) {
+    // 쉬는 시간이 넉넉히 지났으면 처음부터 다시 — 한 번 거부당했다고 계속 안 보내면 안 된다
+    if (gate.restUntil && Date.now() > gate.restUntil + pace.cooldowns[0]) {
+      gate.restUntil = 0;
+      gate.strikes = 0;
+    }
     const wait = gate.restUntil - Date.now();
-    if (wait < -60000) gate.waited = 0; // 한참 조용했으면 기다림 예산을 처음부터
     if (wait > 0) {
-      // 거부가 계속되면 마냥 기다리지 않는다 — 곧장 두 번째 번역기로 넘어가는 편이 낫다
-      if (wait > pace.maxWait || gate.waited + wait > pace.budget) throw new Error('번역 서비스가 바빠요');
-      gate.waited += wait;
+      // 거부가 오래 이어지면 마냥 기다리지 않는다 — 곧장 두 번째 번역기로 넘어가는 편이 낫다
+      if (wait > pace.maxWait || Date.now() > run.waitUntil) throw new Error('번역 서비스가 바빠요');
       await sleep(wait);
     }
     try {
@@ -156,7 +190,7 @@ function loose(segs, lines) {
 /** 두 번째 무료 번역기 (MyMemory). Google 이 거부한 줄만 채운다 */
 async function myMemory(text, { word = false } = {}) {
   const url = `https://api.mymemory.translated.net/get?langpair=en%7Cko&q=${encodeURIComponent(text.slice(0, 480))}`;
-  const res = await queued(() => http(url, { timeout: 8000 }));
+  const res = await mmLane(() => http(url, { timeout: 8000 }));
   if (!res.ok) throw new Error(`MyMemory ${res.status}`);
   const data = res.json();
   const t = data.responseData?.translatedText || '';
@@ -169,12 +203,12 @@ async function myMemory(text, { word = false } = {}) {
 }
 
 /** 묶음 번역 → 실패한 줄은 반으로 쪼개 다시 (out 에 채워 넣는다) */
-async function translateBatch(lines, batch, out, depth = 0) {
+async function translateBatch(lines, batch, out, run, depth = 0) {
   if (!batch.length) return;
   let aligned = null;
   try {
     const texts = batch.map((i) => lines[i]);
-    aligned = alignSegments(await gtx(texts.join('\n')), texts);
+    aligned = alignSegments(await gtx(texts.join('\n'), run), texts);
   } catch (err) {
     console.warn('[translate]', err.message);
   }
@@ -183,12 +217,12 @@ async function translateBatch(lines, batch, out, depth = 0) {
   if (!left.length || depth >= SPLIT_DEPTH) return;
   if (batch.length === 1) return; // 한 줄만 물었는데도 비었다 = 다시 물어도 같다
   if (left.length === 1) {
-    await translateBatch(lines, left, out, depth + 1);
+    await translateBatch(lines, left, out, run, depth + 1);
     return;
   }
   const mid = Math.ceil(left.length / 2);
-  await translateBatch(lines, left.slice(0, mid), out, depth + 1);
-  await translateBatch(lines, left.slice(mid), out, depth + 1);
+  await translateBatch(lines, left.slice(0, mid), out, run, depth + 1);
+  await translateBatch(lines, left.slice(mid), out, run, depth + 1);
 }
 
 /** 번역할 줄을 글자 수·줄 수 기준으로 묶는다 */
@@ -219,18 +253,35 @@ export async function translateMany(lines, onProgress = () => {}, opts = {}) {
   const src = lines.map((l) => String(l ?? '').replace(/\s*\n\s*/g, ' ').trim());
   const out = new Array(src.length).fill('');
   const todo = src.map((l, i) => (l ? i : -1)).filter((i) => i >= 0);
-  const batches = makeBatches(src, todo);
 
-  let done = 0;
-  for (const batch of batches) {
-    await translateBatch(src, batch, out);
-    onProgress(++done / (batches.length + 1));
+  // ① 해석 엔진(LLM)이 켜져 있으면 문맥까지 보고 먼저 번역한다
+  if (engineReady()) {
+    const ko = await llmTranslate(
+      todo.map((i) => src[i]),
+      opts,
+      (p) => onProgress(p * 0.9),
+    );
+    todo.forEach((i, k) => ko[k] && (out[i] = ko[k]));
   }
+
+  // ② LLM 이 없거나 받아 내지 못한 줄만 무료 번역기로
+  const batches = makeBatches(
+    src,
+    todo.filter((i) => !out[i]),
+  );
+
+  // 묶음을 나란히 보낸다 (실제 동시 요청 수·간격은 요청 줄이 형편에 맞게 조절한다)
+  const run = { waitUntil: Date.now() + pace.budget }; // 이번 한 번에 거부를 기다려 줄 한도
+  let done = 0;
+  await mapLimit(batches, pace.lanes + 1, async (batch) => {
+    await translateBatch(src, batch, out, run);
+    onProgress(++done / (batches.length + 1));
+  });
 
   // 그래도 빈 줄은 두 번째 번역기로 채운다 (하루 한도가 작아 일부만)
   const missing = todo.filter((i) => !out[i]);
   if (missing.length) {
-    await mapLimit(missing.slice(0, MYMEMORY_MAX), 2, async (i) => {
+    await mapLimit(missing.slice(0, MYMEMORY_MAX), pace.lanes + 1, async (i) => {
       out[i] = await myMemory(src[i], opts).catch(() => '');
     });
   }
@@ -239,8 +290,8 @@ export async function translateMany(lines, onProgress = () => {}, opts = {}) {
   return out;
 }
 
-async function translateWords(words) {
-  return translateMany(words, () => {}, { word: true });
+async function translateWords(words, title = '') {
+  return translateMany(words, () => {}, { word: true, title });
 }
 
 /* ── 영어 풀이 (무료 사전 API, 가능한 만큼만) ── */
@@ -263,7 +314,7 @@ async function lookup(word) {
 /** 레슨 만들기: 해석 + 단어 + 표현 */
 export async function enrich({ title, sentences }, onProgress = () => {}) {
   await loadWordData();
-  const ko = await translateMany([title, ...sentences.map((s) => s.en)], (p) => onProgress(p * 0.65));
+  const ko = await translateMany([title, ...sentences.map((s) => s.en)], (p) => onProgress(p * 0.65), { title });
 
   // 학습 단어: 구어 빈도 순위로 '너무 쉽지도, 너무 희귀하지도 않은' 단어를 고른다
   const cands = new Map();
@@ -285,7 +336,7 @@ export async function enrich({ title, sentences }, onProgress = () => {}) {
   const picked = [...cands.values()].sort((a, b) => score(b) - score(a)).slice(0, VOCAB_MAX);
 
   // 한국어 뜻은 한 번에 번역, 영어 풀이는 사전에서 가능한 만큼만 (전체 20초 제한)
-  const meaningsP = translateWords(picked.map((c) => c.word));
+  const meaningsP = translateWords(picked.map((c) => c.word), title);
   const dicts = new Map();
   let done = 0;
   await Promise.race([
@@ -315,7 +366,7 @@ export async function enrich({ title, sentences }, onProgress = () => {}) {
   const expressions = findExpressions(sentences).map((e) => ({ ...e, example: sentences[e.i].en }));
   onProgress(1);
   const lesson = {
-    engine: 'basic',
+    engine: engineReady() ? engineModel() : 'basic',
     titleKo: ko[0] || '',
     sentences: sentences.map((s, k) => ({ ...s, ko: ko[k + 1] || '' })),
     vocab,
@@ -352,11 +403,15 @@ export async function fillMissing(lesson, onProgress = () => {}) {
     const ko = await translateMany(
       holes.map((h) => h.text),
       (p) => onProgress(p * share),
+      { title: lesson.title },
     );
     holes.forEach((h, k) => ko[k] && h.put(ko[k]));
   }
   if (words.length) {
-    const ko = await translateWords(words.map((v) => v.word));
+    const ko = await translateWords(
+      words.map((v) => v.word),
+      lesson.title,
+    );
     words.forEach((v, k) => ko[k] && (v.ko = ko[k]));
   }
 
@@ -364,6 +419,34 @@ export async function fillMissing(lesson, onProgress = () => {}) {
   lesson.incomplete = after.total > 0;
   onProgress(1);
   return { lesson, filled: before.total - after.total, left: after.total };
+}
+
+/**
+ * 이미 만든 이야기를 해석 엔진(LLM)으로 다시 해석한다 (문장 + 단어 뜻).
+ * 받아 내지 못한 줄은 지금 해석을 그대로 둔다 — 다시 해석했다고 빈칸이 생기지 않는다.
+ * @returns {Promise<{ lesson: object, changed: number }>}
+ */
+export async function retranslate(lesson, onProgress = () => {}) {
+  if (!engineReady()) throw new Error('해석 엔진이 꺼져 있어요');
+  const title = lesson.title || '';
+  const ko = await llmTranslate([title, ...lesson.sentences.map((s) => s.en)], { title }, (p) => onProgress(p * 0.85));
+  if (ko[0]) lesson.titleKo = ko[0];
+  lesson.sentences.forEach((s, k) => ko[k + 1] && (s.ko = ko[k + 1]));
+
+  const words = lesson.vocab || [];
+  if (words.length) {
+    const wordKo = await llmTranslate(
+      words.map((v) => v.word),
+      { title, word: true },
+      (p) => onProgress(0.85 + p * 0.15),
+    );
+    words.forEach((v, k) => wordKo[k] && (v.ko = wordKo[k]));
+  }
+
+  lesson.engine = engineModel();
+  lesson.incomplete = missingCount(lesson).total > 0;
+  onProgress(1);
+  return { lesson, changed: ko.filter(Boolean).length };
 }
 
 /** 문장 속 아무 단어나 눌렀을 때: 발음기호 + 한국어 뜻 + 영어 풀이 */

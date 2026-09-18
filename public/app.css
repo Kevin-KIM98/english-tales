@@ -177,6 +177,10 @@ h2.section { font: 600 13px/1 var(--sans); color: var(--ink-2); margin: 28px 2px
 .sent .en .w.miss { color: var(--bad); text-decoration: line-through; }
 .sent .ko { font-size: 14.5px; color: var(--ink-2); line-height: 1.6; }
 .sent .ko.hidden { filter: blur(6px); user-select: none; cursor: pointer; }
+.sent .tip { margin-top: 6px; padding: 6px 10px; border-radius: 10px; background: var(--card-2); font-size: 13px; color: var(--ink-2); line-height: 1.5; }
+.sent .tip b { color: var(--ink); font-weight: 600; }
+.sent .tip b::after { content: ' — '; color: var(--ink-3); font-weight: 400; }
+.sent .tip.hidden { filter: blur(6px); user-select: none; }
 .sent .actions { display: flex; gap: 6px; margin-top: 10px; align-items: center; }
 .sent .actions .icon-btn { width: 40px; height: 40px; }
 .sent .actions svg { width: 19px; height: 19px; }

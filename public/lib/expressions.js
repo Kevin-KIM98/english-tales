@@ -1,5 +1,7 @@
-// Claude 없이도 '표현' 탭을 채우기 위한 자주 쓰는 구동사·관용 표현 목록과 문장 매칭
-// [표현, 한국어 뜻, 종류]  종류: pv 구동사 · id 관용 표현 · ln 연결·강조 표현 · co 자주 쓰는 표현
+// '표현' 탭을 채우고, 기계 번역이 직역해 버리는 표현을 문장 옆에 짚어 주는 목록
+// [표현, 한국어 뜻, 종류, 직역주의]  종류: pv 구동사 · id 관용 표현 · ln 연결·강조 표현 · co 자주 쓰는 표현
+// 네 번째 값이 true 면 '직역하면 뜻이 달라지는 표현' — 문장 해석 아래에 뜻을 따로 보여 준다
+// (예: "closed on a house" 를 무료 번역기는 '문을 닫았다'로 옮긴다)
 
 const LIST = [
   ['give up', '포기하다', 'pv'], ['give in', '굴복하다, 항복하다', 'pv'], ['give back', '돌려주다', 'pv'],
@@ -62,6 +64,45 @@ const LIST = [
   ['lose sight of', '~을 보지 못하게 되다, 잊다', 'id'], ['keep in mind', '명심하다', 'id'], ['change your mind', '마음을 바꾸다', 'id'],
   ['do your best', '최선을 다하다', 'co'], ['give it a try', '한번 해 보다', 'id'], ['take a chance', '모험을 하다', 'id'], ['take a risk', '위험을 무릅쓰다', 'id'],
   ['in the long run', '장기적으로', 'id'], ['under pressure', '압박을 받는', 'co'], ['out of reach', '손이 닿지 않는', 'co'], ['behind the scenes', '막후에서', 'id'],
+  /* ── 직역하면 뜻이 달라지는 표현 (문장 해석 아래에 따로 짚어 준다) ── */
+  ['close on a house', '(집) 매매 계약을 최종 체결하다', 'id', true], ['close on a place', '(집) 매매 계약을 최종 체결하다', 'id', true],
+  ['put down a deposit', '보증금·계약금을 걸다', 'id', true], ['take out a loan', '대출을 받다', 'id', true],
+  ['settle down', '자리를 잡다, 정착하다; 진정하다', 'pv', true], ['make ends meet', '겨우 먹고살다', 'id', true],
+  ['fall through', '(계획·거래가) 무산되다', 'pv', true], ['land a job', '일자리를 얻다', 'id', true],
+  ['tie the knot', '결혼하다', 'id', true], ['get your act together', '정신 차리고 제대로 하다', 'id', true],
+  ['have it all figured out', '모든 답을 다 알고 있다', 'id', true], ['catch a break', '운이 트이다, 한숨 돌리다', 'id', true],
+  ['burn out', '지쳐 나가떨어지다', 'pv', true], ['keep up appearances', '겉으로는 멀쩡한 척하다', 'id', true],
+  ['keep your head above water', '간신히 버티다', 'id', true], ['second-guess', '자꾸 의심하며 되짚다', 'id', true], ['second guess*', '자꾸 의심하며 되짚다', 'id', true],
+  ['beat yourself up', '자책하다', 'id', true], ['hold it together', '무너지지 않고 버티다', 'id', true],
+  ['fall into place', '제자리를 찾아가다, 술술 풀리다', 'id', true], ['cut out for', '~에 어울리는 사람이다', 'id', true],
+  ['on paper', '서류상으로는, 겉보기에는', 'id', true], ['a far cry from', '~와는 거리가 먼', 'id', true],
+  ['down the road', '나중에, 앞으로 (길을 따라 내려가다 아님)', 'id'], ['the bottom line', '결론은, 핵심은', 'id', true],
+  ['off the rails', '완전히 엇나간', 'id', true], ['on your plate', '감당해야 할 일', 'id', true],
+  ['play it safe', '안전하게 가다', 'id', true], ['burn bridges', '관계를 돌이킬 수 없게 끊다', 'id', true],
+  ['cold feet', '막판에 겁이 나 망설임', 'id', true], ['second thoughts', '다시 드는 망설임', 'id', true],
+  ['give it a shot', '한번 해 보다', 'id', true], ['touch base', '연락해 소식을 나누다', 'id', true],
+  ['carve out time', '시간을 따로 내다', 'id', true], ['in a rut', '틀에 박혀 제자리걸음인', 'id', true],
+  ['go through the motions', '마음 없이 시늉만 하다', 'id', true], ['on the fence', '결정을 못 하고 망설이는', 'id', true],
+  ['sell yourself short', '자신을 과소평가하다', 'id', true], ['make peace with', '~을 받아들이다', 'id', true],
+  ['move the needle', '눈에 띄는 변화를 만들다', 'id', true], ['do the math', '따져 보다, 계산해 보다', 'id', true],
+  ['in the same boat', '같은 처지인', 'id', true], ['hit the ground running', '시작부터 전력으로 달리다', 'id', true],
+  ['throw in the towel', '포기하다', 'id', true], ['pull yourself together', '마음을 추스르다', 'id', true],
+  ['take stock of', '~을 찬찬히 점검하다', 'id', true], ['worth it', '그만한 가치가 있다', 'co', true],
+  ['ahead of the curve', '남들보다 앞선', 'id', true], ['behind the curve', '남들보다 뒤처진', 'id', true],
+  ['a leg up', '남보다 유리한 출발', 'id', true], ['get ahead', '앞서 나가다, 성공하다', 'pv', true],
+  ['keep up with the joneses', '남들 사는 만큼 따라가려 애쓰다', 'id', true],
+  ['the grass is greener', '남의 떡이 커 보인다', 'id', true], ['bite the bullet', '이를 악물고 해내다', 'id', true],
+  ['call it a day', '오늘은 여기까지 하고 마치다', 'id', true], ['wing it', '준비 없이 즉흥으로 해내다', 'id', true],
+  ['pull it off', '결국 해내다', 'id', true], ['in over your head', '감당 못 할 일에 빠진', 'id', true],
+  ['run its course', '흐를 대로 흘러 끝나다', 'id', true], ['draw the line', '선을 긋다, 한계를 정하다', 'id', true],
+  ['come to terms with', '(힘든 일을) 받아들이다', 'id', true], ['at a crossroads', '갈림길에 선', 'id', true],
+  ['blow off steam', '쌓인 스트레스를 풀다', 'id', true], ['have your hands full', '눈코 뜰 새 없이 바쁘다', 'id', true],
+  ['take a toll', '대가를 치르게 하다, 타격을 주다', 'id', true],
+  ['put things in perspective', '일을 제대로 된 크기로 보다', 'id', true],
+  ['a blessing in disguise', '전화위복', 'id', true], ['better off', '~하는 편이 더 낫다', 'co', true],
+  ['have a point', '일리가 있다', 'co', true], ['set in stone', '확정된, 바꿀 수 없는', 'id', true],
+  ['up in the air', '아직 정해지지 않은', 'id', true], ['behind closed doors', '남들 모르게', 'id', true],
+  ['take the plunge', '큰맘 먹고 뛰어들다', 'id', true], ['running out of time', '시간이 얼마 없다', 'id', true],
 ];
 
 const TYPE = { pv: '구동사', id: '관용 표현', ln: '연결·강조 표현', co: '자주 쓰는 표현' };
@@ -93,16 +134,29 @@ function forms(verb) {
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const PRONOUNS = '(?:it|them|him|her|me|us|you|this|that|everything|something|nothing)';
 
-const MATCHERS = LIST.map(([phrase, ko, type]) => {
+const DET = '(?:a|an|the|my|your|his|her|our|their|this|that)';
+const isDet = (w) => w === 'a' || w === 'an' || w === 'the';
+
+const MATCHERS = LIST.map(([phrase, ko, type, trap = false]) => {
   const words = phrase.split(' ');
   const [first, ...rest] = words;
-  const pron = (w) => (w === 'your' ? '(?:my|your|his|her|our|their)' : w === 'yourself' ? '(?:myself|yourself|himself|herself|ourselves|themselves)' : esc(w));
-  const head = type === 'pv' || type === 'id' || type === 'co' ? `(?:${forms(first).map(esc).join('|')})` : pron(first);
+  const pron = (w) =>
+    isDet(w)
+      ? DET // 'close on a house' 는 'closed on the house' 도 잡는다
+      : w === 'your'
+        ? '(?:my|your|his|her|our|their)'
+        : w === 'yourself'
+          ? '(?:myself|yourself|himself|herself|ourselves|themselves)'
+          : esc(w);
+  const verbHead = (type === 'pv' || type === 'id' || type === 'co') && !isDet(first);
+  const head = verbHead ? `(?:${forms(first).map(esc).join('|')})` : pron(first);
+  // 뒤쪽 낱말이 동사인 표현은 별표로 적는다 ('second guess*' → second guessed·guessing 도 잡는다)
+  const word = (w) => (w.endsWith('*') ? `(?:${forms(w.slice(0, -1)).map(esc).join('|')})` : pron(w));
   // 구동사는 목적어 대명사가 사이에 끼는 경우도 허용 (give it up)
   const gap = type === 'pv' && rest.length === 1 ? `(?:\\s+${PRONOUNS})?` : '';
-  const body = rest.map(pron).join('\\s+');
+  const body = rest.map(word).join('\\s+');
   const re = new RegExp(`\\b${head}${gap}${body ? '\\s+' + body : ''}\\b`, 'i');
-  return { phrase, ko, type, re, len: words.length };
+  return { phrase: phrase.replace(/\*/g, ''), ko, type, trap, re, len: words.length };
 });
 
 /** 문장들에서 표현을 찾아 [{ phrase, ko, note, i }] 로 돌려준다 (먼저 나온 문장 기준, 긴 표현 우선) */
@@ -123,4 +177,18 @@ export function findExpressions(sentences, max = 24) {
     .sort((a, b) => order[a.note] - order[b.note] || a.i - b.i)
     .slice(0, max)
     .map(({ len, ...e }) => e);
+}
+
+/**
+ * 한 문장에서 '직역하면 뜻이 달라지는 표현'을 찾는다 (긴 표현 우선).
+ * 무료 번역기가 통째로 직역해 버리는 자리를 문장 옆에 짚어 주는 용도.
+ * @returns {{ phrase: string, ko: string }[]}
+ */
+export function findTraps(text, max = 2) {
+  const hits = MATCHERS.filter((m) => m.trap && m.re.test(text));
+  return hits
+    .filter((m) => !hits.some((o) => o !== m && o.len > m.len && o.phrase.includes(m.phrase)))
+    .sort((a, b) => b.len - a.len)
+    .slice(0, max)
+    .map((m) => ({ phrase: m.phrase, ko: m.ko }));
 }
