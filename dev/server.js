@@ -9,7 +9,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(here, '..', 'public');
 const PORT = Number(process.env.PORT || 5173);
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json', '.txt': 'text/plain; charset=utf-8' };
-const ALLOWED = /^https:\/\/(www\.youtube\.com|translate\.googleapis\.com|api\.mymemory\.translated\.net|api\.dictionaryapi\.dev|api\.github\.com|kevin-kim98\.github\.io)\//;
+const ALLOWED = /^https:\/\/(www\.youtube\.com|translate\.googleapis\.com|generativelanguage\.googleapis\.com|api\.mymemory\.translated\.net|api\.dictionaryapi\.dev|api\.github\.com|kevin-kim98\.github\.io)\//;
 
 async function readJson(req) {
   const chunks = [];

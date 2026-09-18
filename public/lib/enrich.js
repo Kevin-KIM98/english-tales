@@ -3,6 +3,7 @@
 // 단어·발음기호·난이도·표현: 앱에 들어 있는 오프라인 데이터
 
 import { http } from './net.js';
+import { llmTranslate, engineReady, engineModel } from './llm.js';
 import { COMMON_WORDS } from './common-words.js';
 import { findExpressions } from './expressions.js';
 import { loadWordData, rankOf, lemma, levelOf, ipaOf } from './words.js';
@@ -252,7 +253,22 @@ export async function translateMany(lines, onProgress = () => {}, opts = {}) {
   const src = lines.map((l) => String(l ?? '').replace(/\s*\n\s*/g, ' ').trim());
   const out = new Array(src.length).fill('');
   const todo = src.map((l, i) => (l ? i : -1)).filter((i) => i >= 0);
-  const batches = makeBatches(src, todo);
+
+  // ① 해석 엔진(LLM)이 켜져 있으면 문맥까지 보고 먼저 번역한다
+  if (engineReady()) {
+    const ko = await llmTranslate(
+      todo.map((i) => src[i]),
+      opts,
+      (p) => onProgress(p * 0.9),
+    );
+    todo.forEach((i, k) => ko[k] && (out[i] = ko[k]));
+  }
+
+  // ② LLM 이 없거나 받아 내지 못한 줄만 무료 번역기로
+  const batches = makeBatches(
+    src,
+    todo.filter((i) => !out[i]),
+  );
 
   // 묶음을 나란히 보낸다 (실제 동시 요청 수·간격은 요청 줄이 형편에 맞게 조절한다)
   const run = { waitUntil: Date.now() + pace.budget }; // 이번 한 번에 거부를 기다려 줄 한도
@@ -274,8 +290,8 @@ export async function translateMany(lines, onProgress = () => {}, opts = {}) {
   return out;
 }
 
-async function translateWords(words) {
-  return translateMany(words, () => {}, { word: true });
+async function translateWords(words, title = '') {
+  return translateMany(words, () => {}, { word: true, title });
 }
 
 /* ── 영어 풀이 (무료 사전 API, 가능한 만큼만) ── */
@@ -298,7 +314,7 @@ async function lookup(word) {
 /** 레슨 만들기: 해석 + 단어 + 표현 */
 export async function enrich({ title, sentences }, onProgress = () => {}) {
   await loadWordData();
-  const ko = await translateMany([title, ...sentences.map((s) => s.en)], (p) => onProgress(p * 0.65));
+  const ko = await translateMany([title, ...sentences.map((s) => s.en)], (p) => onProgress(p * 0.65), { title });
 
   // 학습 단어: 구어 빈도 순위로 '너무 쉽지도, 너무 희귀하지도 않은' 단어를 고른다
   const cands = new Map();
@@ -320,7 +336,7 @@ export async function enrich({ title, sentences }, onProgress = () => {}) {
   const picked = [...cands.values()].sort((a, b) => score(b) - score(a)).slice(0, VOCAB_MAX);
 
   // 한국어 뜻은 한 번에 번역, 영어 풀이는 사전에서 가능한 만큼만 (전체 20초 제한)
-  const meaningsP = translateWords(picked.map((c) => c.word));
+  const meaningsP = translateWords(picked.map((c) => c.word), title);
   const dicts = new Map();
   let done = 0;
   await Promise.race([
@@ -350,7 +366,7 @@ export async function enrich({ title, sentences }, onProgress = () => {}) {
   const expressions = findExpressions(sentences).map((e) => ({ ...e, example: sentences[e.i].en }));
   onProgress(1);
   const lesson = {
-    engine: 'basic',
+    engine: engineReady() ? engineModel() : 'basic',
     titleKo: ko[0] || '',
     sentences: sentences.map((s, k) => ({ ...s, ko: ko[k + 1] || '' })),
     vocab,
@@ -387,11 +403,15 @@ export async function fillMissing(lesson, onProgress = () => {}) {
     const ko = await translateMany(
       holes.map((h) => h.text),
       (p) => onProgress(p * share),
+      { title: lesson.title },
     );
     holes.forEach((h, k) => ko[k] && h.put(ko[k]));
   }
   if (words.length) {
-    const ko = await translateWords(words.map((v) => v.word));
+    const ko = await translateWords(
+      words.map((v) => v.word),
+      lesson.title,
+    );
     words.forEach((v, k) => ko[k] && (v.ko = ko[k]));
   }
 
@@ -399,6 +419,34 @@ export async function fillMissing(lesson, onProgress = () => {}) {
   lesson.incomplete = after.total > 0;
   onProgress(1);
   return { lesson, filled: before.total - after.total, left: after.total };
+}
+
+/**
+ * 이미 만든 이야기를 해석 엔진(LLM)으로 다시 해석한다 (문장 + 단어 뜻).
+ * 받아 내지 못한 줄은 지금 해석을 그대로 둔다 — 다시 해석했다고 빈칸이 생기지 않는다.
+ * @returns {Promise<{ lesson: object, changed: number }>}
+ */
+export async function retranslate(lesson, onProgress = () => {}) {
+  if (!engineReady()) throw new Error('해석 엔진이 꺼져 있어요');
+  const title = lesson.title || '';
+  const ko = await llmTranslate([title, ...lesson.sentences.map((s) => s.en)], { title }, (p) => onProgress(p * 0.85));
+  if (ko[0]) lesson.titleKo = ko[0];
+  lesson.sentences.forEach((s, k) => ko[k + 1] && (s.ko = ko[k + 1]));
+
+  const words = lesson.vocab || [];
+  if (words.length) {
+    const wordKo = await llmTranslate(
+      words.map((v) => v.word),
+      { title, word: true },
+      (p) => onProgress(0.85 + p * 0.15),
+    );
+    words.forEach((v, k) => wordKo[k] && (v.ko = wordKo[k]));
+  }
+
+  lesson.engine = engineModel();
+  lesson.incomplete = missingCount(lesson).total > 0;
+  onProgress(1);
+  return { lesson, changed: ko.filter(Boolean).length };
 }
 
 /** 문장 속 아무 단어나 눌렀을 때: 발음기호 + 한국어 뜻 + 영어 풀이 */

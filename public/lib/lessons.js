@@ -3,7 +3,7 @@
 import { db } from './db.js';
 import { getTranscript } from './youtube.js';
 import { buildSentences } from './sentences.js';
-import { enrich, fillMissing, missingCount } from './enrich.js';
+import { enrich, fillMissing, missingCount, retranslate } from './enrich.js';
 
 export const LESSON_VERSION = 3; // 올리면 저장된 레슨을 새 규칙으로 다시 만든다
 
@@ -40,6 +40,18 @@ export async function refillLesson(id, onProgress) {
   const lesson = await getLesson(id);
   if (!lesson) throw new Error('저장된 학습 자료가 없습니다.');
   const res = await fillMissing(lesson, onProgress);
+  await db.set(key(id), res.lesson);
+  return res;
+}
+
+/**
+ * 저장된 이야기를 해석 엔진(LLM)으로 다시 해석해 저장한다 (자막·단어 추출은 그대로).
+ * @returns {Promise<{ lesson: object, changed: number }>}
+ */
+export async function upgradeLesson(id, onProgress) {
+  const lesson = await getLesson(id);
+  if (!lesson) throw new Error('저장된 학습 자료가 없습니다.');
+  const res = await retranslate(lesson, onProgress);
   await db.set(key(id), res.lesson);
   return res;
 }
