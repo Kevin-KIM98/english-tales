@@ -3,7 +3,7 @@
 import { db } from './db.js';
 import { getTranscript } from './youtube.js';
 import { buildSentences } from './sentences.js';
-import { enrich } from './enrich.js';
+import { enrich, fillMissing, missingCount } from './enrich.js';
 
 export const LESSON_VERSION = 3; // 올리면 저장된 레슨을 새 규칙으로 다시 만든다
 
@@ -28,6 +28,20 @@ export async function hasLesson(id) {
 
 export function deleteLesson(id) {
   return db.del(key(id));
+}
+
+export { missingCount };
+
+/**
+ * 비어 있는 해석만 다시 받아 저장한다 (자막·단어 추출은 다시 하지 않는다).
+ * @returns {Promise<{ lesson: object, filled: number, left: number }>}
+ */
+export async function refillLesson(id, onProgress) {
+  const lesson = await getLesson(id);
+  if (!lesson) throw new Error('저장된 학습 자료가 없습니다.');
+  const res = await fillMissing(lesson, onProgress);
+  await db.set(key(id), res.lesson);
+  return res;
 }
 
 export function jobOf(id) {

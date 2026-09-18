@@ -3,13 +3,21 @@
 
 const native = () => Boolean(globalThis.Capacitor?.isNativePlatform?.());
 
+// 테스트에서 네트워크 대신 쓸 함수 ({ status, text } 를 돌려준다). 앱에서는 쓰지 않는다.
+let transport = null;
+export function setTransport(fn) {
+  transport = fn;
+}
+
 /**
  * @returns {Promise<{ status: number, ok: boolean, text: string, json: () => any }>}
  */
 export async function http(url, { method = 'GET', headers = {}, body, timeout = 15000 } = {}) {
   let status;
   let text;
-  if (native()) {
+  if (transport) {
+    ({ status, text } = await transport(url, { method, headers, body, timeout }));
+  } else if (native()) {
     const res = await globalThis.Capacitor.Plugins.CapacitorHttp.request({
       url,
       method,

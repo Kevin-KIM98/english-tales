@@ -7,6 +7,8 @@ import { loadWordData, lemma, levelOf, rankOf, ipaOf } from '../public/lib/words
 import { findExpressions } from '../public/lib/expressions.js';
 import { normalizeChannelInput } from '../public/lib/youtube.js';
 import { ipaOf as arpabetToIpa } from '../scripts/ipa.mjs';
+import { alignSegments, translateMany, fillMissing, missingCount, setPacing } from '../public/lib/enrich.js';
+import { setTransport } from '../public/lib/net.js';
 
 before(async () => {
   // npm run build 로 만든 오프라인 데이터를 읽는다
@@ -88,4 +90,88 @@ test('안드로이드 목소리: 이름이 모두 같아도 목소리마다 다�
   } finally {
     delete globalThis.Capacitor;
   }
+});
+
+/* ── 해석(번역) ── */
+// Google 번역 응답 흉내: 조각마다 [번역, 원문] 이 들어 있고 줄바꿈은 원문 그대로 붙는다
+function fakeSegments(text) {
+  const lines = text.split('\n');
+  return [lines.map((l, k) => [`번역(${l})` + (k < lines.length - 1 ? '\n' : ''), l + (k < lines.length - 1 ? '\n' : ''), null, null, 1])];
+}
+const qOf = (url) => decodeURIComponent(new URL(url).searchParams.get('q'));
+
+/** 번역 요청을 가로채는 가짜 네트워크. reply(줄 목록, 호출 순번) 가 status 를 돌려주면 그대로 응답 */
+function fakeNet(reply) {
+  const calls = [];
+  setTransport(async (url) => {
+    const q = qOf(url);
+    calls.push(q);
+    if (url.startsWith('https://api.mymemory')) {
+      const status = reply(q.split('\n'), calls.length, 'mymemory');
+      if (status && status !== 200) return { status, text: '{}' };
+      return { status: 200, text: JSON.stringify({ responseData: { translatedText: `메모리(${q})` } }) };
+    }
+    const status = reply(q.split('\n'), calls.length, 'google');
+    if (status && status !== 200) return { status, text: '<html>Sorry...</html>' };
+    return { status: 200, text: JSON.stringify(fakeSegments(q)) };
+  });
+  return calls;
+}
+
+test('해석: 조각을 원래 줄에 맞춰 나눈다', () => {
+  const lines = ['It is not loud.', 'It does not announce itself.'];
+  assert.deepEqual(alignSegments(fakeSegments(lines.join('\n'))[0], lines), ['번역(It is not loud.)', '번역(It does not announce itself.)']);
+  // 줄 수가 맞지 않는 응답은 통째로 버린다 (엉뚱한 줄에 붙이지 않는다)
+  assert.equal(alignSegments([['하나', 'It is not loud.']], lines), null);
+  // 한 조각이 두 줄에 걸쳤는데 번역이 나뉘지 않았다면 그 줄들만 비운다
+  assert.deepEqual(alignSegments([['둘을 하나로', 'It is not loud.\nIt does not announce itself.']], lines), ['', '']);
+  // 원문이 안 딸려 와도 줄바꿈 수가 맞으면 그대로 쓴다
+  assert.deepEqual(alignSegments([['크지 않다.\n'], ['스스로 알리지 않는다.']], lines), ['크지 않다.', '스스로 알리지 않는다.']);
+});
+
+test('해석: 묶음이 거부당하면 반으로 쪼개 되살린다', async (t) => {
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0 });
+  t.after(() => (setTransport(null), setPacing({ gap: 350, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000 })));
+  const lines = Array.from({ length: 8 }, (_, i) => `Sentence number ${i}.`);
+  // 4줄이 넘는 요청은 모두 거부 → 쪼개서 받아 와야 한다
+  const calls = fakeNet((qLines) => (qLines.length > 4 ? 429 : 200));
+  const out = await translateMany(lines);
+  assert.equal(out.failed, 0);
+  assert.deepEqual([...out], lines.map((l) => `번역(${l})`));
+  assert.ok(calls.length > 1);
+});
+
+test('해석: Google 이 안 되면 남은 줄만 두 번째 번역기로', async (t) => {
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0 });
+  t.after(() => (setTransport(null), setPacing({ gap: 350, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000 })));
+  const calls = fakeNet((qLines, n, who) => (who === 'google' ? 429 : 200));
+  const out = await translateMany(['It is not loud.', 'Nobody tells you.']);
+  assert.equal(out.failed, 0);
+  assert.deepEqual([...out], ['메모리(It is not loud.)', '메모리(Nobody tells you.)']);
+  assert.ok(calls.some((q) => q === 'It is not loud.'));
+});
+
+test('해석 다시 받기: 비어 있는 곳만 다시 받고 있던 해석은 그대로', async (t) => {
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0 });
+  t.after(() => (setTransport(null), setPacing({ gap: 350, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000 })));
+  const lesson = {
+    title: 'A Story About Falling Behind',
+    titleKo: '뒤처짐에 관한 이야기',
+    sentences: [
+      { i: 0, en: 'It is not loud.', ko: '시끄럽지 않다.' },
+      { i: 1, en: 'Nobody tells you.', ko: '' },
+    ],
+    vocab: [{ word: 'panic', ko: '' }],
+    incomplete: true,
+  };
+  assert.deepEqual(missingCount(lesson), { title: 0, sentences: 1, vocab: 1, total: 2 });
+  const calls = fakeNet(() => 200);
+  const { filled, left } = await fillMissing(lesson);
+  assert.equal(filled, 2);
+  assert.equal(left, 0);
+  assert.equal(lesson.incomplete, false);
+  assert.equal(lesson.sentences[0].ko, '시끄럽지 않다.'); // 이미 있던 해석은 다시 받지 않는다
+  assert.equal(lesson.sentences[1].ko, '번역(Nobody tells you.)');
+  assert.equal(lesson.vocab[0].ko, '번역(panic)');
+  assert.ok(!calls.some((q) => q.includes('It is not loud.')));
 });

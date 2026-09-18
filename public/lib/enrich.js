@@ -25,29 +25,138 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
-/* ── 번역 ── */
-async function gtxOnce(text) {
-  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=' + encodeURIComponent(text);
-  const res = await http(url, { timeout: 12000 });
-  if (!res.ok) throw Object.assign(new Error(`번역 요청 실패 (${res.status})`), { status: res.status });
-  return (res.json()[0] || []).map((seg) => seg[0]).join('');
+/* ── 번역 ──
+   무료 공개 번역 엔드포인트는 요청이 몰리면 잠시 거부(429)한다. 한 번 거부당했다고
+   해석이 통째로 비지 않도록 네 겹으로 막는다.
+   ① 앱 전체에서 번역 요청을 한 줄로 세워 간격을 두고 보낸다 (레슨 여러 개를 동시에 만들 때 특히 중요)
+   ② 거부당하면 잠깐 쉬었다가 다시 보낸다
+   ③ 묶음이 실패하면 반으로 쪼개 되살린다
+   ④ 그래도 빈 줄만 두 번째 번역기(MyMemory)로 채운다 */
+const pace = {
+  gap: 350, // 요청 사이 최소 간격
+  retry: 600, // 실패 후 다시 보내기까지 (시도할수록 길어진다)
+  cooldowns: [4000, 12000, 25000], // 거부를 연달아 맞을 때 쉬는 시간
+  maxWait: 30000, // 한 번에 기다려 주는 최대 시간 (이보다 길면 기다리지 않고 넘어간다)
+  budget: 60000, // 거부가 이어질 때 쉬어 주는 시간의 총합 (넘으면 기다리지 않고 두 번째 번역기로)
+};
+/** 테스트에서 기다리는 시간을 줄일 때만 쓴다 */
+export function setPacing(patch) {
+  Object.assign(pace, patch);
+}
+const BATCH_CHARS = 1800; // 한 요청에 담는 글자 수 (주소가 너무 길면 거부당한다)
+const BATCH_LINES = 40; // 한 요청에 담는 줄 수 (실패해도 잃는 양을 줄인다)
+const SPLIT_DEPTH = 4; // 실패한 묶음을 반으로 쪼개 보는 횟수
+const MYMEMORY_MAX = 80; // 두 번째 번역기는 하루 한도가 작아 조금만 쓴다
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const gate = { chain: Promise.resolve(), last: 0, restUntil: 0, strikes: 0, waited: 0 };
+
+/** 번역 요청을 앱 전체에서 한 줄로 세워 보낸다 */
+function queued(fn) {
+  const run = gate.chain.then(async () => {
+    const wait = gate.last + pace.gap - Date.now();
+    if (wait > 0) await sleep(wait);
+    try {
+      return await fn();
+    } finally {
+      gate.last = Date.now();
+    }
+  });
+  gate.chain = run.then(
+    () => {},
+    () => {},
+  );
+  return run;
 }
 
+/** 거부(429·503)당하면 점점 더 오래 쉰다 — 다른 번역 요청도 함께 기다린다 */
+function rest(status) {
+  if (status !== 429 && status !== 503) return;
+  gate.restUntil = Date.now() + pace.cooldowns[Math.min(gate.strikes, pace.cooldowns.length - 1)];
+  gate.strikes++;
+}
+
+async function gtxOnce(text) {
+  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=ko&dt=t&q=' + encodeURIComponent(text);
+  const res = await queued(() => http(url, { timeout: 12000 }));
+  if (!res.ok) {
+    rest(res.status);
+    throw Object.assign(new Error(`번역 요청 실패 (${res.status})`), { status: res.status });
+  }
+  let segs;
+  try {
+    segs = res.json()[0];
+  } catch {
+    segs = null;
+  }
+  if (!Array.isArray(segs)) throw new Error('번역 응답을 읽지 못했습니다');
+  gate.strikes = 0;
+  gate.waited = 0;
+  return segs;
+}
+
+/** 번역 조각 [번역, 원문] 목록을 받는다. 거부당하면 쉬었다 다시 */
 async function gtx(text, tries = 3) {
   for (let n = 1; ; n++) {
+    const wait = gate.restUntil - Date.now();
+    if (wait < -60000) gate.waited = 0; // 한참 조용했으면 기다림 예산을 처음부터
+    if (wait > 0) {
+      // 거부가 계속되면 마냥 기다리지 않는다 — 곧장 두 번째 번역기로 넘어가는 편이 낫다
+      if (wait > pace.maxWait || gate.waited + wait > pace.budget) throw new Error('번역 서비스가 바빠요');
+      gate.waited += wait;
+      await sleep(wait);
+    }
     try {
       return await gtxOnce(text);
     } catch (err) {
       if (n >= tries) throw err;
-      await new Promise((r) => setTimeout(r, (err.status === 429 ? 4000 : 800) * n));
+      if (gate.restUntil <= Date.now()) await sleep(pace.retry * n);
     }
   }
 }
 
-/** 두 번째 무료 번역기 (MyMemory). 짧은 단어 뜻을 채울 때만 쓴다 */
-async function myMemory(text) {
-  const url = `https://api.mymemory.translated.net/get?langpair=en%7Cko&q=${encodeURIComponent(text)}`;
-  const res = await http(url, { timeout: 8000 });
+/**
+ * 번역 결과를 원래 줄에 맞춰 나눈다.
+ * 응답 조각에는 원문이 함께 들어 있어, 줄바꿈 개수로 어느 줄인지 정확히 찾을 수 있다.
+ * (줄 수가 맞지 않으면 엉뚱한 줄에 붙이지 않고 null 을 돌려준다)
+ * @returns {string[] | null} 줄별 번역 (확신 없는 줄은 빈 문자열)
+ */
+export function alignSegments(segs, lines) {
+  if (!Array.isArray(segs)) return null;
+  const out = new Array(lines.length).fill('');
+  const unsure = new Set();
+  let li = 0;
+  for (const seg of segs) {
+    if (!seg) continue;
+    const orig = String(seg[1] ?? '');
+    const trans = String(seg[0] ?? '');
+    const oParts = orig.split('\n');
+    const tParts = trans.split('\n');
+    const fits = oParts.length === tParts.length;
+    for (let k = 0; k < oParts.length; k++) {
+      if (li >= lines.length) return loose(segs, lines); // 줄이 넘친다 = 조각으로는 못 맞춘다
+      if (fits) out[li] += tParts[k];
+      else unsure.add(li); // 한 조각이 여러 줄에 걸쳐 나뉘지 않았다 → 그 줄들은 버린다
+      if (k < oParts.length - 1) li++;
+    }
+  }
+  if (li !== lines.length - 1) return loose(segs, lines); // 조각으로 못 맞추면 줄바꿈만 보고 나눠 본다
+  return out.map((t, i) => (unsure.has(i) ? '' : t.trim()));
+}
+
+/** 번역을 통째로 이어 붙여 줄바꿈으로만 나눠 본다 (줄 수가 맞을 때만 쓴다) */
+function loose(segs, lines) {
+  const parts = segs
+    .map((seg) => String(seg?.[0] ?? ''))
+    .join('')
+    .split('\n');
+  return parts.length === lines.length ? parts.map((t) => t.trim()) : null;
+}
+
+/** 두 번째 무료 번역기 (MyMemory). Google 이 거부한 줄만 채운다 */
+async function myMemory(text, { word = false } = {}) {
+  const url = `https://api.mymemory.translated.net/get?langpair=en%7Cko&q=${encodeURIComponent(text.slice(0, 480))}`;
+  const res = await queued(() => http(url, { timeout: 8000 }));
   if (!res.ok) throw new Error(`MyMemory ${res.status}`);
   const data = res.json();
   const t = data.responseData?.translatedText || '';
@@ -55,51 +164,83 @@ async function myMemory(text) {
   // 번역 메모리에서 문장째 가져온 엉뚱한 결과는 버린다
   const clean = t.replace(/^[\s\-–·•]+/, '').trim();
   if (!/[가-힣]/.test(clean)) return ''; // 한국어가 아닌 결과("Multipart" 등)는 버린다
-  if (text.split(' ').length <= 3 && (clean.length > 16 || /[.!?]$/.test(clean))) return '';
+  if (word && text.split(' ').length <= 3 && (clean.length > 16 || /[.!?]$/.test(clean))) return '';
   return clean;
 }
 
-/** 여러 줄을 번역 (줄바꿈으로 묶어 요청 수 최소화). 실패한 줄은 빈 문자열, failed 에 개수 */
-export async function translateMany(lines, onProgress = () => {}) {
-  const out = new Array(lines.length).fill('');
+/** 묶음 번역 → 실패한 줄은 반으로 쪼개 다시 (out 에 채워 넣는다) */
+async function translateBatch(lines, batch, out, depth = 0) {
+  if (!batch.length) return;
+  let aligned = null;
+  try {
+    const texts = batch.map((i) => lines[i]);
+    aligned = alignSegments(await gtx(texts.join('\n')), texts);
+  } catch (err) {
+    console.warn('[translate]', err.message);
+  }
+  if (aligned) batch.forEach((i, k) => aligned[k] && (out[i] = aligned[k]));
+  const left = batch.filter((i) => !out[i]);
+  if (!left.length || depth >= SPLIT_DEPTH) return;
+  if (batch.length === 1) return; // 한 줄만 물었는데도 비었다 = 다시 물어도 같다
+  if (left.length === 1) {
+    await translateBatch(lines, left, out, depth + 1);
+    return;
+  }
+  const mid = Math.ceil(left.length / 2);
+  await translateBatch(lines, left.slice(0, mid), out, depth + 1);
+  await translateBatch(lines, left.slice(mid), out, depth + 1);
+}
+
+/** 번역할 줄을 글자 수·줄 수 기준으로 묶는다 */
+function makeBatches(lines, idxs) {
   const batches = [];
   let cur = [];
   let len = 0;
-  lines.forEach((line, idx) => {
-    if (len + line.length > 3500 && cur.length) {
+  for (const i of idxs) {
+    if (cur.length && (len + lines[i].length > BATCH_CHARS || cur.length >= BATCH_LINES)) {
       batches.push(cur);
       cur = [];
       len = 0;
     }
-    cur.push(idx);
-    len += line.length + 1;
-  });
-  if (cur.length) batches.push(cur);
-
-  let failed = 0;
-  for (const [n, batch] of batches.entries()) {
-    try {
-      const translated = (await gtx(batch.map((i) => lines[i]).join('\n'))).split('\n');
-      if (translated.length === batch.length) batch.forEach((i, k) => (out[i] = translated[k].trim()));
-      else for (const i of batch) out[i] = (await gtx(lines[i])).trim();
-    } catch (err) {
-      console.warn('[translate]', err.message);
-      failed += batch.length;
-    }
-    onProgress((n + 1) / batches.length);
+    cur.push(i);
+    len += lines[i].length + 1;
   }
-  out.failed = failed;
+  if (cur.length) batches.push(cur);
+  return batches;
+}
+
+/**
+ * 여러 줄을 번역한다. 실패한 줄은 빈 문자열로 두고 개수를 failed 에 담는다.
+ * @param {string[]} lines
+ * @param {(p:number)=>void} onProgress
+ * @param {{ word?: boolean }} opts 단어 뜻을 받을 때는 word: true
+ */
+export async function translateMany(lines, onProgress = () => {}, opts = {}) {
+  const src = lines.map((l) => String(l ?? '').replace(/\s*\n\s*/g, ' ').trim());
+  const out = new Array(src.length).fill('');
+  const todo = src.map((l, i) => (l ? i : -1)).filter((i) => i >= 0);
+  const batches = makeBatches(src, todo);
+
+  let done = 0;
+  for (const batch of batches) {
+    await translateBatch(src, batch, out);
+    onProgress(++done / (batches.length + 1));
+  }
+
+  // 그래도 빈 줄은 두 번째 번역기로 채운다 (하루 한도가 작아 일부만)
+  const missing = todo.filter((i) => !out[i]);
+  if (missing.length) {
+    await mapLimit(missing.slice(0, MYMEMORY_MAX), 2, async (i) => {
+      out[i] = await myMemory(src[i], opts).catch(() => '');
+    });
+  }
+  onProgress(1);
+  out.failed = todo.filter((i) => !out[i]).length;
   return out;
 }
 
 async function translateWords(words) {
-  const out = await translateMany(words);
-  const missing = words.map((w, k) => (out[k] ? -1 : k)).filter((k) => k >= 0);
-  await mapLimit(missing, 3, async (k) => {
-    out[k] = await myMemory(words[k]).catch(() => '');
-  });
-  out.failed = out.filter((x) => !x).length;
-  return out;
+  return translateMany(words, () => {}, { word: true });
 }
 
 /* ── 영어 풀이 (무료 사전 API, 가능한 만큼만) ── */
@@ -173,14 +314,56 @@ export async function enrich({ title, sentences }, onProgress = () => {}) {
 
   const expressions = findExpressions(sentences).map((e) => ({ ...e, example: sentences[e.i].en }));
   onProgress(1);
-  return {
+  const lesson = {
     engine: 'basic',
-    incomplete: ko.failed > 0 || meanings.failed > 0,
-    titleKo: ko[0],
+    titleKo: ko[0] || '',
     sentences: sentences.map((s, k) => ({ ...s, ko: ko[k + 1] || '' })),
     vocab,
     expressions,
   };
+  lesson.incomplete = missingCount(lesson).total > 0;
+  return lesson;
+}
+
+/** 해석이 비어 있는 곳이 몇 군데인지 (제목·문장·단어 뜻) */
+export function missingCount(lesson) {
+  const sentences = lesson.sentences?.filter((s) => !s.ko).length || 0;
+  const vocab = lesson.vocab?.filter((v) => !v.ko).length || 0;
+  const title = lesson.titleKo ? 0 : 1;
+  return { title, sentences, vocab, total: title + sentences + vocab };
+}
+
+/**
+ * 비어 있는 해석만 다시 받아 채운다 (이미 받아 둔 해석·단어·표현은 그대로 둔다).
+ * @returns {Promise<{ lesson: object, filled: number, left: number }>}
+ */
+export async function fillMissing(lesson, onProgress = () => {}) {
+  const before = missingCount(lesson);
+  if (!before.total) return { lesson, filled: 0, left: 0 };
+
+  // 제목 + 빈 문장을 한 번에, 빈 단어 뜻은 그다음에 (단어는 다른 규칙으로 걸러 낸다)
+  const holes = [];
+  if (!lesson.titleKo) holes.push({ text: lesson.title, put: (ko) => (lesson.titleKo = ko) });
+  for (const s of lesson.sentences || []) if (!s.ko) holes.push({ text: s.en, put: (ko) => (s.ko = ko) });
+  const words = (lesson.vocab || []).filter((v) => !v.ko);
+
+  const share = holes.length && words.length ? 0.8 : 1;
+  if (holes.length) {
+    const ko = await translateMany(
+      holes.map((h) => h.text),
+      (p) => onProgress(p * share),
+    );
+    holes.forEach((h, k) => ko[k] && h.put(ko[k]));
+  }
+  if (words.length) {
+    const ko = await translateWords(words.map((v) => v.word));
+    words.forEach((v, k) => ko[k] && (v.ko = ko[k]));
+  }
+
+  const after = missingCount(lesson);
+  lesson.incomplete = after.total > 0;
+  onProgress(1);
+  return { lesson, filled: before.total - after.total, left: after.total };
 }
 
 /** 문장 속 아무 단어나 눌렀을 때: 발음기호 + 한국어 뜻 + 영어 풀이 */
@@ -190,7 +373,10 @@ export async function define(word) {
   const key = word.toLowerCase();
   if (defineCache.has(key)) return defineCache.get(key);
   const base = lemma(key);
-  const [dict, ko] = await Promise.all([lookup(base), gtx(base, 1).catch(() => myMemory(base).catch(() => ''))]);
+  const [dict, ko] = await Promise.all([
+    lookup(base),
+    translateMany([base], () => {}, { word: true }).then((r) => r[0] || ''),
+  ]);
   const out = {
     word: dict?.word || base,
     ipa: ipaOf(dict?.word || base),
