@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>English Tales 설치</title>
+  <meta name="description" content="유튜브 이야기로 배우는 영어 — 안드로이드 앱 설치" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <style>
+    :root {
+      --paper: #f5efe3; --card: #fffaf0; --ink: #1d1b18; --ink-2: #5c554b; --ink-3: #8d8476;
+      --line: #e2d7c3; --accent: #c7661f; --accent-ink: #fff; --accent-soft: #f6dcc2;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --paper: #12141c; --card: #1b1e29; --ink: #f1ebdf; --ink-2: #b9b1a3; --ink-3: #847d71; --line: #2c3142; --accent: #f0a45b; --accent-ink: #1a1206; --accent-soft: #3a2a1c; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.6 system-ui, -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif; }
+    main { max-width: 480px; margin: 0 auto; padding: 28px 16px 40px; }
+    .head { display: flex; gap: 14px; align-items: center; }
+    .head img { width: 64px; height: 64px; border-radius: 16px; }
+    h1 { font: 700 28px/1.2 Georgia, serif; margin: 0; }
+    .sub { color: var(--ink-2); font-size: 14px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 18px; margin-top: 18px; }
+    .dl { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 56px; border-radius: 16px; background: var(--accent); color: var(--accent-ink); font-size: 18px; font-weight: 700; text-decoration: none; }
+    .ver { text-align: center; color: var(--ink-3); font-size: 13px; margin-top: 8px; }
+    ol { padding-left: 22px; margin: 6px 0 0; }
+    li { margin: 8px 0; }
+    b { color: var(--accent); }
+    .note { font-size: 13.5px; color: var(--ink-2); }
+    .note code { background: var(--accent-soft); padding: 1px 6px; border-radius: 6px; word-break: break-all; }
+    h2 { font-size: 16px; margin: 0 0 4px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="head">
+      <img src="icon.svg" alt="" />
+      <div>
+        <h1>English Tales</h1>
+        <div class="sub">유튜브 이야기로 배우는 영어 · 안드로이드 앱</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <a class="dl" href="english-tales.apk" download>⬇ 앱 설치 파일 받기</a>
+      <div class="ver" id="ver">최신 버전</div>
+    </div>
+
+    <div class="card">
+      <h2>설치 순서</h2>
+      <ol>
+        <li>위 버튼으로 <b>english-tales.apk</b> 를 내려받습니다.</li>
+        <li>받은 파일을 열고, 처음 한 번은 <b>이 출처 허용</b>을 켭니다.</li>
+        <li><b>설치</b>를 누릅니다. Play 프로텍트 경고가 나오면 <b>무시하고 설치</b>.</li>
+      </ol>
+    </div>
+
+    <div class="card note">
+      <h2>설치한 뒤에는</h2>
+      새 버전은 <b>앱 안에서 바로 업데이트</b>됩니다. 앱 첫 화면의 "새 버전" 알림을 누르거나, 그냥 두면 다음에 앱을 열 때 자동으로 적용돼요.
+      이 페이지는 처음 설치할 때만 필요합니다.
+    </div>
+
+    <div class="card note">
+      <h2>파일이 안 받아질 때</h2>
+      GitHub 앱이나 카메라 앱 안에서 열렸다면, 오른쪽 위 메뉴의 <b>브라우저에서 열기</b>(Chrome·삼성 인터넷)를 누른 뒤 다시 받아 보세요.<br />
+      주소: <code>kevin-kim98.github.io/english-tales</code>
+    </div>
+  </main>
+  <script>
+    fetch('update.json?t=' + Date.now())
+      .then((r) => r.json())
+      .then((u) => {
+        const d = u.date ? ' · ' + new Date(u.date).toLocaleDateString('ko-KR') : '';
+        document.getElementById('ver').textContent = `최신 버전 ${u.version}${d} · 약 ${u.apkSizeMB || 4}MB · 안드로이드 전용`;
+      })
+      .catch(() => {});
+  </script>
+</body>
+</html>

@@ -8,16 +8,13 @@
 
 <p align="center"><img src="docs/install-qr-card.png" alt="English Tales 설치 QR 코드" width="360"></p>
 
-휴대폰 카메라로 QR 코드를 찍으면 **항상 최신 버전** APK가 바로 내려받아집니다.
-(주소: `https://github.com/Kevin-KIM98/english-tales/releases/latest/download/english-tales.apk`,
-QR만 있는 이미지: [docs/install-qr.png](docs/install-qr.png))
+1. 휴대폰 카메라로 QR 코드를 찍거나 **https://kevin-kim98.github.io/english-tales/** 를 엽니다.
+2. **앱 설치 파일 받기** → 받은 파일 열기 → 처음 한 번은 **이 출처 허용** → **설치**.
+3. **처음 한 번만 설치하면 끝.** 이후 프로그램을 수정해 main 에 머지하면
+   앱이 새 버전을 스스로 받아 **앱 안에서 바로 업데이트**합니다 (알림을 누르면 즉시, 그냥 두면 다음 실행 때 자동).
+   안드로이드 네이티브 부분(플러그인 등)을 바꾼 경우에만 앱이 새 설치 파일을 내려받게 안내합니다.
 
-
-1. 휴대폰에서 이 저장소의 [**Releases**](https://github.com/Kevin-KIM98/english-tales/releases/latest) 를 열고
-   `english-tales-v1.0.N.apk` 를 눌러 내려받습니다.
-2. 내려받은 파일을 열어 **설치** (처음 한 번은 "출처를 알 수 없는 앱 설치 허용"을 켜야 합니다).
-3. 이후 새 버전이 나오면 앱 첫 화면과 **설정 → 앱 정보**에 "업데이트"가 표시됩니다. 누르면 새 APK를 받아 덮어 설치합니다.
-   (학습 기록·단어장은 그대로 유지됩니다)
+> 카메라·GitHub 앱 안에서 열려 파일이 안 받아지면, 메뉴의 **브라우저에서 열기**를 누른 뒤 다시 받으세요.
 
 > 더 자연스러운 발음: 휴대폰 **설정 → 일반 → 텍스트 음성 변환(TTS)** 에서 엔진을 *Google 음성 서비스*로 하고
 > 영어(미국) 음성 데이터를 설치하세요. 앱 **설정 → 발음 → 음성 데이터** 버튼으로도 바로 갈 수 있습니다.
@@ -49,12 +46,15 @@ QR만 있는 이미지: [docs/install-qr.png](docs/install-qr.png))
 GitHub에서 수정 (새 브랜치 + Pull Request)
   └▶ CI 검사 (ci.yml: 빌드 데이터 생성 · 문법 검사 · 테스트)  ── 통과해야 머지 가능
        └▶ main 머지
-            └▶ Android Release (android.yml): 테스트 → APK 빌드·서명 → GitHub Release v1.0.<실행번호>
-                 └▶ 휴대폰 앱이 새 버전을 알려 줌 → 업데이트
+            └▶ Android Release (android.yml): 테스트 → APK 빌드·서명 + 앱 안 업데이트용 코드 묶음(web-*.zip)
+                 └▶ GitHub Pages(설치 페이지·APK·update.json) 배포 + GitHub Release 기록
+                      └▶ 휴대폰 앱이 update.json 확인 → 앱 안에서 바로 업데이트
 ```
 
 - 파일을 GitHub에서 열고 ✏️ → **Create a new branch … and start a pull request** → 검사 ✅ → **Merge**.
 - `main` 은 보호되어 있어 PR + 검사 통과가 필요합니다.
+- `android/` 폴더나 안드로이드 플러그인(package.json 의 @capacitor…)을 바꾸면 `package.json` 의 **`nativeVersion`** 을 1 올리세요.
+  그래야 앱이 '앱 안 업데이트' 대신 새 설치 파일을 받도록 안내합니다. 화면·기능(public/) 수정은 그대로 두면 됩니다.
 - APK 서명 키는 GitHub Secrets(`ANDROID_KEYSTORE_BASE64` 등)에만 있습니다. 원본은 로컬 `english-tales-signing` 폴더에 보관 —
   **잃어버리면 기존 설치 위에 업데이트할 수 없으니 따로 백업하세요.**
 
