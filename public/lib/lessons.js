@@ -56,6 +56,42 @@ export async function upgradeLesson(id, onProgress) {
   return res;
 }
 
+/** 저장된 이야기 중 무료 번역기로 만든 것들의 videoId */
+export async function basicLessonIds() {
+  const ids = [];
+  for (const k of await db.keys()) {
+    const id = String(k).startsWith('lesson:') ? String(k).slice('lesson:'.length) : '';
+    if (!id) continue;
+    const lesson = await getLesson(id);
+    if (lesson && (!lesson.engine || lesson.engine === 'basic')) ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * 저장된 이야기를 차례로 해석 엔진(LLM)으로 다시 해석한다.
+ * @param {(s:{done:number,total:number,title:string})=>void} onProgress
+ * @param {() => boolean} stopped 중간에 멈출지 물어본다
+ */
+export async function upgradeAllLessons(onProgress = () => {}, stopped = () => false) {
+  const ids = await basicLessonIds();
+  let done = 0;
+  let failed = 0;
+  for (const id of ids) {
+    if (stopped()) break;
+    const lesson = await getLesson(id);
+    onProgress({ done, total: ids.length, title: lesson?.title || '' });
+    try {
+      await upgradeLesson(id);
+    } catch (err) {
+      console.warn('[upgrade]', id, err.message);
+      failed++;
+    }
+    onProgress({ done: ++done, total: ids.length, title: lesson?.title || '' });
+  }
+  return { done, total: ids.length, failed };
+}
+
 export function jobOf(id) {
   return jobs.get(id);
 }

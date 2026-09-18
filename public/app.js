@@ -1,7 +1,7 @@
 // English Tales — 유튜브 이야기 채널 자막으로 공부하는 안드로이드 학습 앱
 // 서버 없이 휴대폰 안에서 채널 목록·자막·해석·단어를 모두 처리한다.
 import { getChannel, getMoreVideos } from './lib/youtube.js';
-import { buildLesson, getLesson, refillLesson, upgradeLesson, missingCount, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
+import { buildLesson, getLesson, refillLesson, upgradeLesson, upgradeAllLessons, basicLessonIds, missingCount, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
 import { define } from './lib/enrich.js';
 import { findTraps } from './lib/expressions.js';
 import { resumeIndex } from './lib/study.js';
@@ -1278,6 +1278,8 @@ function renderFlashcards(deck) {
 }
 
 /* ───────────── 설정 ───────────── */
+let upAllIds = []; // 무료 번역기로 만들어 둔 이야기 (설정 화면에서 한꺼번에 다시 해석)
+
 function renderSettings() {
   const recent = [DEFAULT_CHANNEL, ...settings.recentChannels].filter((c, i, a) => a.indexOf(c) === i && c !== settings.channel).slice(0, 5);
   $view.innerHTML = `
@@ -1315,6 +1317,8 @@ function renderSettings() {
         <button class="btn" id="llmCheck">확인</button></div>
       <div class="row"><div class="label">키 발급<small>Google AI Studio 에서 무료로 만들 수 있어요</small></div>
         <button class="btn" id="llmHelp">발급 방법</button></div>
+      <div class="row"><div class="label">저장해 둔 이야기 다시 해석<small id="upAllState">무료 번역기로 만든 이야기를 세는 중…</small></div>
+        <button class="btn" id="upAll">모두 다시 해석</button></div>
     </div>
     <p class="muted" style="font-size:12.5px;margin:8px 4px 0">켜면 학습할 <b>문장이 Google 서버로 전송</b>돼 번역됩니다.
       무료 한도를 넘기면 자동으로 무료 번역기로 돌아가므로 해석이 비지 않아요.</p>
@@ -1418,6 +1422,35 @@ function renderSettings() {
     }
   });
   on('llmHelp', 'click', () => openDownload(KEY_HELP));
+
+  // 저장해 둔 이야기(무료 번역기로 만든 것)를 한꺼번에 LLM 해석으로
+  basicLessonIds().then((ids) => {
+    const el = document.getElementById('upAllState');
+    if (!el) return;
+    upAllIds = ids;
+    el.textContent = ids.length ? `${ids.length}편이 무료 번역기로 되어 있어요` : '모두 LLM 해석이에요';
+    const btn = document.getElementById('upAll');
+    if (btn) btn.disabled = !ids.length;
+  });
+  on('upAll', 'click', async (e) => {
+    const btn = e.currentTarget;
+    const el = document.getElementById('upAllState');
+    if (!engineReady()) return (el.textContent = '먼저 키를 넣고 해석 엔진을 켜 주세요');
+    if (!confirm(`${upAllIds.length}편을 LLM 해석으로 바꿀까요? 무료 한도를 쓰게 됩니다.`)) return;
+    let stop = false;
+    btn.textContent = '멈추기';
+    btn.onclick = () => {
+      stop = true;
+      btn.textContent = '멈추는 중…';
+    };
+    const res = await upgradeAllLessons(
+      ({ done, total, title }) => (el.textContent = `${done}/${total}편 · ${title}`),
+      () => stop,
+    );
+    lessons.clear();
+    toast(res.failed ? `${res.done - res.failed}편 바꿨어요 · ${res.failed}편 실패` : `${res.done}편을 LLM 해석으로 바꿨어요`);
+    renderSettings();
+  });
 
   on('autoPrepare', 'change', (e) => {
     settings.autoPrepare = e.target.checked;
