@@ -6,6 +6,13 @@
 
 ## 설치 · 업데이트 (휴대폰)
 
+<p align="center"><img src="docs/install-qr-card.png" alt="English Tales 설치 QR 코드" width="360"></p>
+
+휴대폰 카메라로 QR 코드를 찍으면 **항상 최신 버전** APK가 바로 내려받아집니다.
+(주소: `https://github.com/Kevin-KIM98/english-tales/releases/latest/download/english-tales.apk`,
+QR만 있는 이미지: [docs/install-qr.png](docs/install-qr.png))
+
+
 1. 휴대폰에서 이 저장소의 [**Releases**](https://github.com/Kevin-KIM98/english-tales/releases/latest) 를 열고
    `english-tales-v1.0.N.apk` 를 눌러 내려받습니다.
 2. 내려받은 파일을 열어 **설치** (처음 한 번은 "출처를 알 수 없는 앱 설치 허용"을 켜야 합니다).

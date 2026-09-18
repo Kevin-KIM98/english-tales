@@ -64,13 +64,15 @@ jobs:
           APK="$PWD/app/build/outputs/apk/release/app-release.apk"
           test -f "$APK"
           cp "$APK" "$RUNNER_TEMP/english-tales-v$VERSION_NAME.apk"
+          # 이름이 고정된 사본: 설치 QR 코드(releases/latest/download/english-tales.apk)가 항상 최신 버전을 받게 한다
+          cp "$APK" "$RUNNER_TEMP/english-tales.apk"
 
       - name: GitHub Release 로 배포
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           NOTES=$(git log -1 --format='%s%n%n%b' | sed '/^Co-Authored-By/d')
-          gh release create "v$VERSION_NAME" "$RUNNER_TEMP/english-tales-v$VERSION_NAME.apk" \
+          gh release create "v$VERSION_NAME" "$RUNNER_TEMP/english-tales-v$VERSION_NAME.apk" "$RUNNER_TEMP/english-tales.apk" \
             --title "English Tales $VERSION_NAME" \
             --notes "$NOTES
 
