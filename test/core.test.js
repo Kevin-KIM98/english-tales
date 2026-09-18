@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { buildSentences } from '../public/lib/sentences.js';
 import { loadWordData, lemma, levelOf, rankOf, ipaOf } from '../public/lib/words.js';
-import { findExpressions } from '../public/lib/expressions.js';
+import { findExpressions, findTraps } from '../public/lib/expressions.js';
 import { normalizeChannelInput } from '../public/lib/youtube.js';
 import { ipaOf as arpabetToIpa } from '../scripts/ipa.mjs';
 import { alignSegments, translateMany, fillMissing, missingCount, setPacing } from '../public/lib/enrich.js';
@@ -130,8 +130,8 @@ test('해석: 조각을 원래 줄에 맞춰 나눈다', () => {
 });
 
 test('해석: 묶음이 거부당하면 반으로 쪼개 되살린다', async (t) => {
-  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0 });
-  t.after(() => (setTransport(null), setPacing({ gap: 350, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000 })));
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0, budget: 0 });
+  t.after(() => (setTransport(null), setPacing({ gap: 120, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000, budget: 30000, lanes: 3 })));
   const lines = Array.from({ length: 8 }, (_, i) => `Sentence number ${i}.`);
   // 4줄이 넘는 요청은 모두 거부 → 쪼개서 받아 와야 한다
   const calls = fakeNet((qLines) => (qLines.length > 4 ? 429 : 200));
@@ -142,8 +142,8 @@ test('해석: 묶음이 거부당하면 반으로 쪼개 되살린다', async (t
 });
 
 test('해석: Google 이 안 되면 남은 줄만 두 번째 번역기로', async (t) => {
-  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0 });
-  t.after(() => (setTransport(null), setPacing({ gap: 350, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000 })));
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0, budget: 0 });
+  t.after(() => (setTransport(null), setPacing({ gap: 120, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000, budget: 30000, lanes: 3 })));
   const calls = fakeNet((qLines, n, who) => (who === 'google' ? 429 : 200));
   const out = await translateMany(['It is not loud.', 'Nobody tells you.']);
   assert.equal(out.failed, 0);
@@ -152,8 +152,8 @@ test('해석: Google 이 안 되면 남은 줄만 두 번째 번역기로', asyn
 });
 
 test('해석 다시 받기: 비어 있는 곳만 다시 받고 있던 해석은 그대로', async (t) => {
-  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0 });
-  t.after(() => (setTransport(null), setPacing({ gap: 350, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000 })));
+  setPacing({ gap: 0, retry: 0, cooldowns: [0], maxWait: 0, budget: 0 });
+  t.after(() => (setTransport(null), setPacing({ gap: 120, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000, budget: 30000, lanes: 3 })));
   const lesson = {
     title: 'A Story About Falling Behind',
     titleKo: '뒤처짐에 관한 이야기',
@@ -174,4 +174,38 @@ test('해석 다시 받기: 비어 있는 곳만 다시 받고 있던 해석은 
   assert.equal(lesson.sentences[1].ko, '번역(Nobody tells you.)');
   assert.equal(lesson.vocab[0].ko, '번역(panic)');
   assert.ok(!calls.some((q) => q.includes('It is not loud.')));
+});
+
+test('직역하면 뜻이 달라지는 표현 짚어 주기', () => {
+  // 무료 번역기는 이 문장을 '문을 닫은 채 학교에 다닌 사람'으로 옮긴다
+  const t = findTraps('Someone you went to school with just closed on a house.');
+  assert.equal(t.length, 1);
+  assert.equal(t[0].phrase, 'close on a house');
+  assert.match(t[0].ko, /매매/);
+  // 관사가 달라도, 활용형이어도 찾는다
+  assert.equal(findTraps('She is closing on the house next week.')[0]?.phrase, 'close on a house');
+  assert.equal(findTraps('He kept his head above water for a year.')[0]?.phrase, 'keep your head above water');
+  // 평범한 문장에는 아무것도 붙이지 않는다
+  assert.deepEqual(findTraps('It is not loud.'), []);
+});
+
+test('해석: 한 번 거부당해도 다음번에는 다시 구글로 (잠김 없음)', async (t) => {
+  setPacing({ gap: 0, retry: 0, cooldowns: [30], maxWait: 1000, budget: 0, lanes: 2 });
+  t.after(() => (setTransport(null), setPacing({ gap: 120, retry: 600, cooldowns: [4000, 12000, 25000], maxWait: 30000, budget: 30000, lanes: 3 })));
+  let refuse = true;
+  let google = 0;
+  fakeNet((qLines, n, who) => {
+    if (who !== 'google') return 200;
+    google++;
+    return refuse ? 429 : 200;
+  });
+  await translateMany(['It is not loud.']); // 거부당해 두 번째 번역기로 넘어간다
+  assert.ok(google > 0);
+
+  refuse = false;
+  const before = google;
+  await new Promise((r) => setTimeout(r, 80)); // 쉬는 시간이 지나면
+  const out = await translateMany(['Nobody tells you.']);
+  assert.ok(google > before, '쉬는 시간이 지난 뒤에는 구글에 다시 물어봐야 한다');
+  assert.equal(out[0], '번역(Nobody tells you.)');
 });

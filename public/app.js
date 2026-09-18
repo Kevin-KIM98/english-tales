@@ -3,6 +3,7 @@
 import { getChannel, getMoreVideos } from './lib/youtube.js';
 import { buildLesson, getLesson, refillLesson, missingCount, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
 import { define } from './lib/enrich.js';
+import { findTraps } from './lib/expressions.js';
 import { createTTS } from './lib/tts.js';
 import { db } from './lib/db.js';
 import { checkUpdate, applyUpdate, prepareWebUpdate, markAppReady, appInfo } from './lib/update.js';
@@ -526,9 +527,10 @@ async function renderLesson(id, tab) {
     const msg = document.getElementById('gapMsg');
     btn.disabled = true;
     const show = (t) => msg && (msg.textContent = t);
-    show('해석을 다시 받는 중… 0%');
+    const step = (p) => show(`해석을 다시 받는 중… ${Math.min(gaps.total, Math.round(p * gaps.total))}/${gaps.total}`);
+    step(0);
     try {
-      const { filled, left } = await refillLesson(id, (p) => show(`해석을 다시 받는 중… ${Math.round(p * 100)}%`));
+      const { filled, left } = await refillLesson(id, step);
       if (token !== routeToken) return;
       lessons.delete(id);
       await renderLesson(id, tab);
@@ -577,6 +579,13 @@ function vocabFor(lesson, token) {
   });
 }
 
+/** 무료 번역기가 직역해 버리는 표현은 문장 아래에 뜻을 따로 짚어 준다 */
+function tipsHTML(en) {
+  return findTraps(en)
+    .map((t) => `<div class="tip"><b>${esc(t.phrase)}</b> ${esc(t.ko)}</div>`)
+    .join('');
+}
+
 function sentenceHTML(lesson, s) {
   return s.en
     .split(/\s+/)
@@ -606,6 +615,7 @@ function paneSentences(pane, lesson, p) {
           <div class="no"><span>${String(s.i + 1).padStart(2, '0')}</span><span class="check">${learned.has(s.i) ? '✓ 익힘' : ''}</span></div>
           <div class="en">${sentenceHTML(lesson, s)}</div>
           <div class="ko ${hideKo ? 'hidden' : ''}">${esc(s.ko)}</div>
+          ${tipsHTML(s.en)}
           <div class="actions">
             <button class="icon-btn" data-act="play" aria-label="듣기">${icon.speaker}</button>
             <button class="icon-btn" data-act="slow" aria-label="천천히 듣기">${icon.slow}</button>
@@ -635,7 +645,7 @@ function paneSentences(pane, lesson, p) {
   };
   document.getElementById('toggleKo').onclick = (e) => {
     hideKo = !hideKo;
-    pane.querySelectorAll('.sent .ko').forEach((k) => k.classList.toggle('hidden', hideKo));
+    pane.querySelectorAll('.sent .ko, .sent .tip').forEach((k) => k.classList.toggle('hidden', hideKo));
     e.currentTarget.querySelector('span').textContent = hideKo ? '해석 보기' : '해석 가리기';
   };
 
@@ -891,8 +901,8 @@ function paneVocab(pane, lesson) {
 /* 표현 탭 */
 function paneExpressions(pane, lesson) {
   if (!lesson.expressions.length) {
-    pane.innerHTML = `<div class="empty">${icon.book}<div>표현 해설은 Claude 해석 엔진에서 제공돼요.</div>
-      <div style="font-size:12.5px;margin-top:6px">서버 .env에 ANTHROPIC_API_KEY를 넣고 레슨을 다시 만들어 보세요.</div></div>`;
+    pane.innerHTML = `<div class="empty">${icon.book}<div>이 이야기에서는 찾은 표현이 없어요.</div>
+      <div style="font-size:12.5px;margin-top:6px">구동사·관용 표현이 나오면 여기에 뜻과 예문이 모입니다.</div></div>`;
     return;
   }
   pane.innerHTML = `<div class="vocab-list">${lesson.expressions
