@@ -45,8 +45,26 @@ function extractInitialData(html) {
   return JSON.parse(m[1]);
 }
 
-/** ytInitialData / browse 응답에서 영상(제목·길이)과 다음 페이지 토큰을 모은다. */
+/**
+ * '3d ago', '2 weeks ago', 'Streamed 1 month ago' → 대략적인 올린 시각(ms).
+ * 채널 목록에는 상대 시간만 있어서, 불러온 시점 기준으로 날짜를 추정한다.
+ */
+const UNIT_MS = { s: 1e3, m: 6e4, h: 36e5, d: 864e5, w: 6048e5, mo: 2592e6, y: 31536e6 };
+export function parseRelative(text, now = Date.now()) {
+  const m = String(text || '').match(/(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|wks?|w|months?|mos?|mo|years?|yrs?|y)\b\s*ago/i);
+  if (!m) return null;
+  const u = m[2].toLowerCase();
+  const key = /^mo/.test(u) ? 'mo' : /^mi|^m$/.test(u) ? 'm' : u[0];
+  return now - Number(m[1]) * UNIT_MS[key];
+}
+
+function agoText(parts) {
+  return parts.find((t) => /\bago$/i.test(t || '')) || '';
+}
+
+/** ytInitialData / browse 응답에서 영상(제목·길이·올린 날짜)과 다음 페이지 토큰을 모은다. */
 function collectVideos(root) {
+  const now = Date.now();
   const videos = [];
   let continuation = null;
   const seen = new Set();
@@ -56,16 +74,19 @@ function collectVideos(root) {
       const l = o.lockupViewModel;
       const title = l.metadata?.lockupMetadataViewModel?.title?.content;
       const badge = JSON.stringify(l.contentImage || {}).match(/"text":"(\d+(?::\d+){1,2})"/);
+      const rows = l.metadata?.lockupMetadataViewModel?.metadata?.contentMetadataViewModel?.metadataRows || [];
+      const ago = agoText(rows.flatMap((r) => (r.metadataParts || []).map((p) => p.text?.content)));
       if (title && !seen.has(l.contentId)) {
         seen.add(l.contentId);
-        videos.push({ id: l.contentId, title, duration: badge ? badge[1] : '' });
+        videos.push({ id: l.contentId, title, duration: badge ? badge[1] : '', published: parseRelative(ago, now), exact: false });
       }
     } else if (o.videoRenderer?.videoId) {
       const v = o.videoRenderer;
       const title = v.title?.runs?.map((r) => r.text).join('') || v.title?.simpleText;
       if (title && !seen.has(v.videoId)) {
         seen.add(v.videoId);
-        videos.push({ id: v.videoId, title, duration: v.lengthText?.simpleText || '' });
+        const ago = v.publishedTimeText?.simpleText || '';
+        videos.push({ id: v.videoId, title, duration: v.lengthText?.simpleText || '', published: parseRelative(ago, now), exact: false });
       }
     }
     if (o.continuationCommand?.token) continuation = o.continuationCommand.token;
@@ -84,6 +105,7 @@ export async function getChannel(input) {
   const data = extractInitialData(res.text);
   const meta = data.metadata?.channelMetadataRenderer || {};
   const { videos, continuation } = collectVideos(data.contents);
+  await applyExactDates(meta.externalId, videos);
   return {
     channelId: meta.externalId || '',
     title: meta.title || path,
@@ -93,6 +115,19 @@ export async function getChannel(input) {
     videos,
     continuation,
   };
+}
+
+/** 채널 RSS(최근 15편)의 정확한 게시 시각으로 추정 날짜를 바로잡는다 */
+async function applyExactDates(channelId, videos) {
+  if (!channelId) return;
+  try {
+    const res = await http(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`, { timeout: 8000 });
+    if (!res.ok) return;
+    const exact = new Map(
+      [...res.text.matchAll(/<yt:videoId>([^<]+)<\/yt:videoId>[\s\S]*?<published>([^<]+)<\/published>/g)].map((m) => [m[1], Date.parse(m[2])]),
+    );
+    for (const v of videos) if (exact.has(v.id)) Object.assign(v, { published: exact.get(v.id), exact: true });
+  } catch {} // RSS가 안 되면 추정 날짜 그대로
 }
 
 export async function getMoreVideos(continuation) {
