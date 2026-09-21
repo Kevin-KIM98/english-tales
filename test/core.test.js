@@ -7,7 +7,7 @@ import { loadWordData, lemma, levelOf, rankOf, ipaOf } from '../public/lib/words
 import { findExpressions, findTraps } from '../public/lib/expressions.js';
 import { normalizeChannelInput } from '../public/lib/youtube.js';
 import { resumeIndex } from '../public/lib/study.js';
-import { analyzeTopics, wordsOf, TOPIC_WORDS } from '../public/lib/topics.js';
+import { analyzeTopics, wordsOf, TOPIC_WORDS, TOPIC_LESSONS } from '../public/lib/topics.js';
 import { ipaOf as arpabetToIpa } from '../scripts/ipa.mjs';
 import { alignSegments, translateMany, fillMissing, missingCount, setPacing } from '../public/lib/enrich.js';
 import { setTransport } from '../public/lib/net.js';
@@ -297,6 +297,47 @@ test('주제별 핵심단어: 이름·너무 쉬운 단어는 빼고 사전형�
   assert.ok(!list.includes('because')); // 너무 쉬운 단어 제외
   assert.ok(list.includes('mother') && !list.includes('mothers')); // 활용형은 사전형으로 합친다
   assert.equal(family.words.find((w) => w.word === 'mother').count, 2);
+});
+
+test('주제별 핵심단어: 최신 이야기의 단어가 앞에 온다', () => {
+  const story = (id, en) => ({ videoId: id, title: '이야기 ' + id, sentences: [{ i: 0, en, ko: '해석' }] });
+  const newer = story('new', 'The mortgage payment was late again this month.');
+  const older = story('old', 'The bank denied the loan and the debt kept growing.');
+  const order = (lessons) => analyzeTopics(lessons).find((t) => t.id === 'money').words.map((w) => w.word);
+  // 같은 이야기 둘을 순서만 바꿔 넣으면, 앞(최신)에 둔 이야기의 단어가 위로 온다
+  assert.ok(order([newer, older]).indexOf('mortgage') < order([newer, older]).indexOf('loan'));
+  assert.ok(order([older, newer]).indexOf('loan') < order([older, newer]).indexOf('mortgage'));
+  // 문장도 최신 이야기 것부터 모은다
+  const both = analyzeTopics([newer, older]).find((t) => t.id === 'money');
+  assert.deepEqual(
+    both.sentences.map((s) => s.videoId),
+    ['new', 'old'],
+  );
+});
+
+test('주제별 핵심단어: 오래된 이야기는 보지 않는다', () => {
+  const money = { videoId: 'new', title: '최신', sentences: [{ i: 0, en: 'The mortgage payment was late.', ko: '해석' }] };
+  const school = { videoId: 'old', title: '예전', sentences: [{ i: 0, en: 'Tuition for the semester was due.', ko: '해석' }] };
+  const ids = analyzeTopics([money, school], { maxLessons: 1 }).map((t) => t.id);
+  assert.deepEqual(ids, ['money']); // 최신 1편만 봤으니 예전 이야기의 주제는 나오지 않는다
+  assert.ok(analyzeTopics([money, school]).some((t) => t.id === 'school')); // 기본값 안에서는 둘 다
+  assert.ok(TOPIC_LESSONS >= 1);
+});
+
+test('주제별 핵심단어: 예문은 해석이 있는 문장을 먼저 고르고, 문장 번호를 실어 준다', () => {
+  const lesson = {
+    videoId: 'v',
+    title: '이야기',
+    sentences: [
+      { i: 0, en: 'The mortgage was the reason for the argument.', ko: '' }, // 해석이 비어 있는 줄
+      { i: 1, en: 'He could not pay the mortgage that winter.', ko: '그해 겨울 그는 대출금을 내지 못했다.' },
+    ],
+  };
+  const money = analyzeTopics([lesson]).find((t) => t.id === 'money');
+  const mortgage = money.words.find((w) => w.word === 'mortgage');
+  assert.equal(money.sentences[mortgage.i].ko, '그해 겨울 그는 대출금을 내지 못했다.');
+  // 원래 이야기의 몇 번째 문장인지 함께 준다 (앱이 받아 온 해석을 그 이야기에 되돌려 저장한다)
+  for (const s of money.sentences) assert.equal(s.en, lesson.sentences[s.si].en);
 });
 
 /* ── 해석 엔진 (LLM) ── */

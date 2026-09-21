@@ -45,6 +45,16 @@ export async function refillLesson(id, onProgress) {
 }
 
 /**
+ * 채워 넣은 해석 등을 저장한다 (자막·단어 추출은 그대로).
+ * 비어 있는 곳 표시(incomplete)는 지금 내용대로 다시 계산한다.
+ */
+export async function saveLesson(id, lesson) {
+  lesson.incomplete = missingCount(lesson).total > 0;
+  await db.set(key(id), lesson);
+  return lesson;
+}
+
+/**
  * 저장된 이야기를 해석 엔진(LLM)으로 다시 해석해 저장한다 (자막·단어 추출은 그대로).
  * @returns {Promise<{ lesson: object, changed: number }>}
  */
