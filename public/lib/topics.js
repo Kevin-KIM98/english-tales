@@ -1,10 +1,15 @@
 // 주제별 핵심단어: 저장해 둔 이야기들을 훑어 주제를 나누고, 주제마다 핵심단어와 그 단어가 나오는 문장을 모은다.
+// 최신 영상 기준: 이야기를 최신순으로 받아, 최근 이야기에 나온 단어일수록 높은 점수를 주고 예문도 최근 것부터 고른다.
 // 서버·인터넷 없이 앱 안 데이터(빈도·발음기호)와 주제 씨앗 단어만으로 계산한다 (순수 계산 → 테스트 가능).
 import { COMMON_WORDS } from './common-words.js';
 import { lemma, rankOf, ipaOf, levelOf } from './words.js';
 
 /** 주제마다 뽑는 핵심단어 개수 */
 export const TOPIC_WORDS = 20;
+/** 단어를 뽑을 때 보는 최신 이야기 편 수 (그보다 오래된 이야기는 보지 않는다) */
+export const TOPIC_LESSONS = 30;
+/** 가장 오래된 이야기의 가중치 (최신 이야기는 1) — 최근에 본 영상의 단어가 앞으로 오게 한다 */
+const RECENCY_FLOOR = 0.45;
 
 /** 주제 씨앗 단어: 이 단어가 들어 있는 문장을 그 주제로 본다 (사전형·소문자) */
 export const TOPICS = [
@@ -145,31 +150,35 @@ function isCandidate(word, seed) {
   return r >= 900 && r <= 40000;
 }
 
-// 점수: 주제를 대표하는 씨앗 + 이야기 속 반복 등장 + 적당한 난이도
-const scoreOf = (c) => (c.seed ? 4 : 0) + Math.min(c.count, 8) * 1.1 + Math.log(Math.min(Math.max(rankOf(c.word), 100), 20000)) / 2;
+// 점수: 주제를 대표하는 씨앗 + 이야기 속 반복 등장(최신 이야기일수록 크게) + 적당한 난이도
+const scoreOf = (c) => (c.seed ? 4 : 0) + Math.min(c.weight, 8) * 1.1 + Math.log(Math.min(Math.max(rankOf(c.word), 100), 20000)) / 2;
 
 /**
  * 저장된 이야기들 → 주제별 핵심단어 + 관련 문장.
  * @param {Array<{videoId?:string,title?:string,sentences:Array<{i:number,en:string,ko?:string}>,vocab?:Array<object>}>} lessons
- * @param {{ maxWords?: number, maxSentences?: number, meanings?: Record<string, object> }} opts
+ *   **최신순**으로 넘긴다 (앞에 올수록 최근 영상). 앞쪽 이야기의 단어가 더 높은 점수를 받는다.
+ * @param {{ maxWords?: number, maxSentences?: number, maxLessons?: number, meanings?: Record<string, object> }} opts
  *   meanings: 이미 알고 있는 뜻 (이야기 단어장·저장해 둔 뜻) — 없으면 뜻이 빈 채로 나온다
  * @returns {Array<{id:string,name:string,emoji:string,words:object[],sentences:object[],sentenceTotal:number}>}
  */
 export function analyzeTopics(lessons, opts = {}) {
   const maxWords = opts.maxWords ?? TOPIC_WORDS;
   const maxSentences = opts.maxSentences ?? 60;
+  // 최신 이야기 몇 편만 본다 (오래된 이야기는 주제·단어에 끼어들지 않는다)
+  const recent = (lessons || []).slice(0, opts.maxLessons ?? TOPIC_LESSONS);
+  const weightOf = (li) => (recent.length <= 1 ? 1 : 1 - (li / (recent.length - 1)) * (1 - RECENCY_FLOOR));
   const seedMap = seeds();
 
   // 이미 받아 둔 뜻 모으기 (이야기 단어장 → 넘겨받은 뜻 순으로)
   const known = new Map();
-  for (const lesson of lessons || [])
+  for (const lesson of recent)
     for (const v of lesson.vocab || []) if (v.ko && !known.has(v.word)) known.set(v.word, v);
   for (const [w, v] of Object.entries(opts.meanings || {})) if (v?.ko && !known.has(w)) known.set(w, v);
 
   // ① 문장마다 단어를 뽑고, 소문자로도 쓰이는 단어를 모아 둔다 (문장 첫 단어가 이름인지 가릴 때 쓴다)
   const lines = [];
   const lower = new Set();
-  (lessons || []).forEach((lesson, li) => {
+  recent.forEach((lesson, li) => {
     for (const s of lesson.sentences || []) {
       if (!s?.en) continue;
       const toks = tokensOf(s.en);
@@ -188,7 +197,7 @@ export function analyzeTopics(lessons, opts = {}) {
       for (const w of new Set(tokens)) for (const id of seedMap.get(w) || []) hits.set(id, (hits.get(id) || 0) + 1);
       if (!hits.size) continue;
       const best = Math.max(...hits.values());
-      const item = { li, en: s.en, ko: s.ko || '', videoId: lesson.videoId, title: lesson.title || '', tokens, si: s.i };
+      const item = { li, w: weightOf(li), en: s.en, ko: s.ko || '', videoId: lesson.videoId, title: lesson.title || '', tokens, si: s.i };
       for (const [id, n] of hits) if (n === best) byTopic.get(id).push(item);
     }
   }
@@ -203,8 +212,9 @@ export function analyzeTopics(lessons, opts = {}) {
       for (const w of new Set(item.tokens)) {
         const seed = (seedMap.get(w) || []).includes(t.id);
         if (!isCandidate(w, seed)) continue;
-        const c = counts.get(w) || { word: w, count: 0, seed, at: [] };
+        const c = counts.get(w) || { word: w, count: 0, weight: 0, seed, at: [] };
         c.count++;
+        c.weight += item.w;
         if (c.at.length < 8) c.at.push(k);
         counts.set(w, c);
       }
@@ -223,12 +233,12 @@ export function analyzeTopics(lessons, opts = {}) {
     const order = [...chosen].sort((a, b) => a - b);
     const sentences = order.map((k, i) => {
       const it = items[k];
-      return { i, en: it.en, ko: it.ko, videoId: it.videoId, title: it.title };
+      return { i, en: it.en, ko: it.ko, videoId: it.videoId, title: it.title, si: it.si };
     });
     const posOf = new Map(order.map((k, i) => [k, i]));
 
     const words = picked.map((c) => {
-      const at = c.at.find((k) => posOf.has(k)) ?? c.at[0];
+      const at = c.at.find((k) => posOf.has(k) && items[k].ko) ?? c.at.find((k) => posOf.has(k)) ?? c.at[0];
       const i = posOf.get(at) ?? 0;
       const seen = known.get(c.word);
       return {
