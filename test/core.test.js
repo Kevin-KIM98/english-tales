@@ -301,6 +301,25 @@ test('핵심단어: 이름은 빼고 사전형으로 모으며, 뜻은 이야기
   assert.equal(pickKeywords(lesson, { meanings: { accountant: { ko: '회계사' } } }).find((it) => it.word === 'accountant').ko, '회계사');
 });
 
+test('핵심단어: 축약형·발음 사전에 없는 찌꺼기는 뽑지 않고, 이야기 단어장의 핵심어를 앞세운다', () => {
+  const lines = [
+    "It wasn't what you've been told, and it doesn't matter.",
+    "You've made them the judge and yourself the defendant.",
+    'He wasnt sure, but youve seen this resentment before.', // 자동 자막처럼 아포스트로피가 빠진 형태
+    'The reluctant accountant kept a ledger of every grievance.',
+  ];
+  const items = pickKeywords(story(lines));
+  const list = items.map((it) => it.word);
+  for (const junk of ['wasnt', 'doesnt', 'youve', 'wasn', 'doesn']) assert.ok(!list.includes(junk), `${junk} 는 단어가 아니다`);
+  assert.ok(list.includes('defendant') && list.includes('resentment'));
+  assert.ok(items.every((it) => it.ipa), '발음 사전에 있는 진짜 단어만 뽑는다');
+  // 이야기 단어장에 뽑힌 단어는 같은 조건에서 앞으로 온다
+  const plain = pickKeywords(story(lines)).map((it) => it.word);
+  const boosted = pickKeywords(story(lines, { vocab: [{ word: 'grievance' }] })).map((it) => it.word);
+  assert.ok(boosted.indexOf('grievance') <= plain.indexOf('grievance'));
+  assert.equal(boosted[0], 'grievance');
+});
+
 /* ── 해석 엔진 (LLM) ── */
 const isLlm = (url) => url.startsWith('https://generativelanguage.googleapis.com');
 const geminiReply = (items) => ({

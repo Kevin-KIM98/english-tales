@@ -6,10 +6,14 @@ import { lemma, rankOf, ipaOf, levelOf } from './words.js';
 /** 이야기 한 편에서 뽑는 핵심단어(= 붙는 문장) 개수 */
 export const KEYWORD_COUNT = 20;
 
-// 영상 끝 '구독·댓글' 안내에서 나오는 단어는 핵심단어로 보지 않는다
-const SKIP = new Set(['subscribe', 'subscriber', 'comment', 'channel', 'notification', 'video', 'playlist', 'episode', 'share']);
+// 핵심단어로 보지 않는 말: 영상 끝 '구독·댓글' 안내, 구어 추임새·속어
+const SKIP = new Set(
+  `subscribe subscriber comment channel notification video playlist episode share
+   gonna wanna gotta kinda sorta dunno lemme gimme yeah yep nope okay hmm huh ugh whoa wow hey`.split(/\s+/),
+);
 const MIN_RANK = 1500; // 이보다 흔한 단어는 '어렵지 않다'고 본다
 const MAX_RANK = 45000; // 빈도 목록에 없는 말(오타·이름)은 뺀다
+const HARD_CAP = 20000; // 이보다 드문 단어는 더 어렵다고 쳐 주지 않는다 (희귀한 찌꺼기가 위로 오지 않게)
 
 /**
  * 문장 → 사전형 단어 목록. 문장 중간의 대문자 단어는 이름·지명으로 보고 뺀다.
@@ -22,7 +26,9 @@ export function tokensOf(en) {
   raw.forEach((w, k) => {
     const upper = w.length > 1 && w[0] === w[0].toUpperCase();
     if (k > 0 && upper) return;
-    const base = lemma(w.toLowerCase().replace(/'s$/, '').replace(/'/g, ''));
+    const bare = w.toLowerCase().replace(/'s$/, '');
+    if (bare.includes("'")) return; // wasn't · you've 같은 축약형은 단어가 아니다
+    const base = lemma(bare);
     if (base.length >= 3) out.push({ word: base, head: k === 0 && upper });
   });
   return out;
@@ -31,8 +37,8 @@ export function tokensOf(en) {
 /** 문장 속 학습 대상 단어 (사전형) */
 export const wordsOf = (en) => tokensOf(en).map((t) => t.word);
 
-// 점수: 어려울수록(빈도 순위가 낮을수록) 높게, 이야기 속에서 되풀이되면 조금 더
-const scoreOf = (c) => Math.log(Math.min(rankOf(c.word), MAX_RANK)) * 1.6 + Math.min(c.count, 5) * 0.7;
+// 점수: 어려울수록(빈도 순위가 낮을수록) 높게 + 이야기 속 반복 등장 + 이야기 단어장에 뽑힌 핵심어 가점
+const scoreOf = (c) => Math.log(Math.min(c.rank, HARD_CAP)) * 1.6 + Math.min(c.count, 5) * 0.7 + (c.core ? 1.5 : 0);
 
 /** 예문으로 쓸 문장 고르기: 해석이 있는 것 → 아직 쓰지 않은 것 → 짧은 것 */
 function pickExample(cands, sentences, used) {
@@ -60,9 +66,14 @@ export function pickKeywords(lesson, opts = {}) {
   const sentences = (lesson?.sentences || []).filter((s) => s?.en);
   if (!sentences.length) return [];
 
-  // 이미 알고 있는 뜻 (이야기 단어장 → 넘겨받은 뜻 순)
+  // 이미 알고 있는 뜻 (이야기 단어장 → 넘겨받은 뜻 순). 이야기 단어장에 뽑힌 단어는 '핵심어'로 가점
   const known = new Map();
-  for (const v of lesson.vocab || []) if (v?.word && v.ko) known.set(v.word, v);
+  const core = new Set();
+  for (const v of lesson.vocab || []) {
+    if (!v?.word) continue;
+    core.add(v.word);
+    if (v.ko) known.set(v.word, v);
+  }
   for (const [w, v] of Object.entries(opts.meanings || {})) if (v?.ko && !known.has(w)) known.set(w, v);
 
   // ① 단어 세기 (문장 첫 단어가 이름인지 가리려고 소문자로도 쓰인 단어를 모아 둔다)
@@ -76,7 +87,9 @@ export function pickKeywords(lesson, opts = {}) {
       if (SKIP.has(t) || t.length < 4 || COMMON_WORDS.has(t)) continue;
       const rank = rankOf(t);
       if (rank < MIN_RANK || rank > MAX_RANK) continue;
-      const c = counts.get(t) || { word: t, count: 0, rank, at: [] };
+      // 발음 사전(CMU)에 있는 진짜 단어만 — 자막 찌꺼기(wasnt · youve)나 오타는 여기서 걸러진다
+      if (!ipaOf(t)) continue;
+      const c = counts.get(t) || { word: t, count: 0, rank, core: core.has(t), at: [] };
       c.count++;
       c.at.push(k);
       counts.set(t, c);
