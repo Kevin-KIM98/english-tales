@@ -3,7 +3,7 @@
 import { getChannel, getMoreVideos } from './lib/youtube.js';
 import { buildLesson, getLesson, saveLesson, refillLesson, upgradeLesson, upgradeAllLessons, basicLessonIds, missingCount, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
 import { define, translateMany } from './lib/enrich.js';
-import { analyzeTopics, TOPIC_WORDS, TOPIC_LESSONS } from './lib/topics.js';
+import { pickKeywords, KEYWORD_COUNT } from './lib/keywords.js';
 import { loadWordData } from './lib/words.js';
 import { findTraps } from './lib/expressions.js';
 import { resumeIndex } from './lib/study.js';
@@ -35,7 +35,7 @@ const store = {
 };
 
 const settings = Object.assign(
-  { channel: DEFAULT_CHANNEL, voice: '', rate: 0.95, showKo: true, theme: 'auto', repeat: 1, gap: 0.8, loopAll: false, autoPrepare: true, sort: 'new', recentChannels: [], llmOn: false, llmKey: '', llmModel: '' },
+  { channel: DEFAULT_CHANNEL, voice: '', rate: 0.95, showKo: true, theme: 'auto', repeat: 1, gap: 0.8, loopAll: false, autoPrepare: true, sort: 'new', recentChannels: [], llmOn: false, llmKey: '', llmModel: '', drillRepeat: 2, drillKo: true, drillLoopAll: false },
   store.get('settings', {}),
 );
 const saveSettings = () => {
@@ -133,14 +133,15 @@ function route() {
   routeToken++;
   tts.stop();
   player.stop(true);
+  drill.close();
   closeSheet();
   const hash = location.hash.slice(1) || '/';
   const [, page, id, tab] = hash.split('/');
   document.querySelectorAll('.tabbar a').forEach((a) => a.classList.toggle('on', a.dataset.nav === (page || 'home')));
-  $app.classList.toggle('immersive', page === 'lesson' || (page === 'topics' && Boolean(id)));
+  $app.classList.toggle('immersive', page === 'lesson' || (page === 'keywords' && Boolean(id)));
   window.scrollTo(0, 0);
   if (page === 'lesson' && id) return renderLesson(id, tab);
-  if (page === 'topics') return renderTopics(id, tab);
+  if (page === 'keywords') return renderKeywords(id);
   if (page === 'words') return renderWords(id === 'review');
   if (page === 'settings') return renderSettings();
   renderHome();
@@ -250,7 +251,7 @@ function prefetchLessons(videos) {
     const p = (progress[v.id] ||= { learned: [], total: 0 });
     Object.assign(p, { titleKo: lesson.titleKo, total: lesson.sentences.length, title: lesson.title });
     saveProgress();
-    resetTopics();
+    resetKeywords();
     if ((location.hash.split('/')[1] || '') === '') renderHome();
   });
 }
@@ -303,7 +304,8 @@ function storyStatus(v) {
 }
 
 function renderHome(error) {
-  const learnedTotal = Object.entries(progress).reduce((n, [id, p]) => (isTopicId(id) ? n : n + (p.learned?.length || 0)), 0);
+  // ':' 가 든 열쇠는 예전 버전의 '주제 학습' 진도 — 같은 문장을 두 번 세지 않는다
+  const learnedTotal = Object.entries(progress).reduce((n, [id, p]) => (id.includes(':') ? n : n + (p.learned?.length || 0)), 0);
   const ch = channelData?.source === settings.channel ? channelData : null;
   const checked = ch?.checkedAt ? new Date(ch.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 
@@ -328,9 +330,9 @@ function renderHome(error) {
       <div class="card stat"><b>${wordList().length}</b><span>저장한 단어</span></div>
       <div class="card stat"><b>${streak()}일</b><span>연속 학습</span></div>
     </div>
-    <h2 class="section"><span>주제별 핵심단어</span>
-      <a class="btn ghost" href="#/topics" style="min-height:32px;padding:0 10px;font-size:12.5px">모두 보기</a></h2>
-    <div class="topic-strip" id="topicStrip"><div class="skeleton" style="height:70px"></div></div>
+    <h2 class="section"><span>핵심단어 · 반복 듣기</span>
+      <a class="btn ghost" href="#/keywords" style="min-height:32px;padding:0 10px;font-size:12.5px">모두 보기</a></h2>
+    <div class="kw-strip" id="kwStrip"><div class="skeleton" style="height:70px"></div></div>
     <label class="search">${icon.search}<input id="q" type="search" placeholder="제목으로 찾기" value="${esc(homeFilter)}" aria-label="제목 검색" /></label>
     <div class="sortbar" role="group" aria-label="정렬">
       <button data-sort="new" class="${settings.sort !== 'old' ? 'on' : ''}">최신순</button>
@@ -410,7 +412,7 @@ function renderHome(error) {
     if (channelData?.source === settings.channel) paint();
   });
   document.getElementById('doUpdate')?.addEventListener('click', (e) => runUpdate(e.currentTarget));
-  paintTopicStrip();
+  paintKeywordStrip();
   if (checking) setRefreshing(true);
   if (ch) paint();
   else if (!error) refreshChannel();
@@ -452,7 +454,7 @@ async function fetchLesson(id, title, onWait) {
   if (lessons.has(id)) return lessons.get(id);
   const stored = await getLesson(id);
   const lesson = stored || (await buildLesson(id, title, onWait));
-  if (!stored) resetTopics(); // 새 이야기가 생겼으니 주제별 단어를 다시 모은다
+  if (!stored) resetKeywords(); // 새 이야기가 생겼으니 핵심단어를 다시 뽑는다
   lessons.set(id, lesson);
   return lesson;
 }
@@ -662,7 +664,6 @@ function paneSentences(pane, lesson, p, announce) {
         .map(
           (s) => `<article class="card sent ${learned.has(s.i) ? 'learned' : ''}" id="s${s.i}" data-i="${s.i}">
           <div class="no"><span>${String(s.i + 1).padStart(2, '0')}</span><span class="check">${learned.has(s.i) ? '✓ 익힘' : ''}</span></div>
-          ${s.title ? `<div class="src">${icon.book} ${esc(s.title)}</div>` : ''}
           <div class="en">${sentenceHTML(lesson, s)}</div>
           <div class="ko ${hideKo ? 'hidden' : ''}">${esc(s.ko)}</div>
           ${tipsHTML(s.en)}
@@ -935,11 +936,13 @@ function paneVocab(pane, lesson) {
   if (!lesson.vocab.length) return (pane.innerHTML = `<div class="empty">${icon.book}<div>추출된 단어가 없어요</div></div>`);
   pane.innerHTML = `
     <div class="tools">
-      <span class="muted grow" style="font-size:13px">문장 속 밑줄 단어를 눌러도 뜻을 볼 수 있어요</span>
+      <button class="btn primary grow" id="drillVocab">${icon.repeat} 반복 듣기 (단어 → 뜻 → 문장 → 뜻)</button>
       <button class="btn" id="saveAll">${icon.star} 모두 저장</button>
     </div>
+    <p class="muted" style="font-size:12.5px;margin:-4px 0 12px">문장 속 밑줄 단어를 눌러도 뜻을 볼 수 있어요</p>
     <div class="vocab-list">${lesson.vocab.map((v) => vocabCard(v, lesson)).join('')}</div>`;
   bindVocabActions(pane.querySelector('.vocab-list'), () => lesson.vocab, lesson);
+  document.getElementById('drillVocab').onclick = () => openDrill(toDrillItems(lesson.vocab, lesson), { title: lesson.title });
   document.getElementById('saveAll').onclick = () => {
     let n = 0;
     for (const v of lesson.vocab)
@@ -1183,25 +1186,27 @@ async function openWordSheet(token, lesson) {
   bindVocabActions(sheet, () => [v], lesson);
 }
 
-/* ───────────── 주제별 핵심단어 ─────────────
-   저장해 둔 이야기들을 훑어 주제(가족·돈·직장 …)를 나누고, 주제마다 핵심단어 20개와
-   그 단어가 나오는 문장을 모아 준다. 레슨 화면과 같은 단어·문장·퀴즈 학습을 그대로 쓴다. */
-const MEANS_KEY = 'wordMeanings'; // 주제 단어의 한국어 뜻 캐시 (한 번 받으면 다시 받지 않는다)
-const topicKey = (id) => 'topic:' + id;
-const isTopicId = (id) => String(id).startsWith('topic:');
+/* ───────────── 스토리별 핵심단어 + 반복 듣기 ─────────────
+   최신 이야기부터, 이야기 한 편에서 어려운 단어 20개와 그 단어가 들어간 문장 20개를 뽑는다.
+   반복 듣기는 '영어 단어 → 한국어 뜻 → 영어 문장 → 한국어 뜻' 한 벌을 정한 횟수만큼 되풀이하고 다음 단어로 넘어간다. */
+const MEANS_KEY = 'wordMeanings'; // 단어 뜻 캐시 (한 번 받으면 다시 받지 않는다)
+const KEYWORD_STORIES = 30; // 목록에 올리는 최신 이야기 편 수
 
-let topicCache = null; // { topics, lessonCount, usedCount }
-let topicJob = null;
-/** 이야기가 늘거나 해석이 바뀌면 다음에 열 때 다시 모은다 */
-function resetTopics() {
-  topicCache = null;
+let storyList = null; // [{ videoId, title, titleKo, at, sentences, words }] 최신순
+let storyJob = null;
+const keywordCache = new Map(); // videoId → { items, title, titleKo }
+
+/** 이야기가 늘거나 해석이 바뀌면 다음에 열 때 다시 뽑는다 */
+function resetKeywords() {
+  storyList = null;
+  keywordCache.clear();
 }
 
-/** 저장된 이야기 전부 → 주제별 핵심단어·문장 (한 번 계산해 두고 재사용) */
-function loadTopics() {
-  if (topicCache) return Promise.resolve(topicCache);
-  if (topicJob) return topicJob;
-  topicJob = (async () => {
+/** 저장해 둔 이야기 목록 (최신 영상부터) + 이야기마다 핵심단어 뽑아 두기 */
+function loadStories() {
+  if (storyList) return Promise.resolve(storyList);
+  if (storyJob) return storyJob;
+  storyJob = (async () => {
     await loadWordData();
     const lessons = [];
     for (const k of await db.keys()) {
@@ -1211,246 +1216,475 @@ function loadTopics() {
     }
     // 최신 영상 기준: 올린 날짜(모르면 학습 자료를 만든 때)가 늦은 이야기부터
     const published = new Map((channelData?.videos || []).map((v) => [v.id, v.published || 0]));
-    const madeAt = (l) => published.get(l.videoId) || Date.parse(l.createdAt || '') || 0;
-    lessons.sort((a, b) => madeAt(b) - madeAt(a));
-    // 이미 알고 있는 뜻(단어장·전에 받아 둔 뜻)은 다시 번역하지 않는다
+    const at = (l) => published.get(l.videoId) || Date.parse(l.createdAt || '') || 0;
+    lessons.sort((a, b) => at(b) - at(a));
+
+    // 이미 알고 있는 뜻(이야기 단어장·단어장·전에 받아 둔 뜻)은 다시 번역하지 않는다
     const meanings = { ...((await db.get(MEANS_KEY)) || {}) };
     for (const w of wordList()) if (w.ko && !meanings[w.word]) meanings[w.word] = w;
-    topicCache = {
-      topics: analyzeTopics(lessons, { meanings }),
-      lessonCount: lessons.length,
-      usedCount: Math.min(lessons.length, TOPIC_LESSONS),
-    };
-    return topicCache;
-  })().finally(() => (topicJob = null));
-  return topicJob;
+
+    storyList = lessons.slice(0, KEYWORD_STORIES).map((lesson) => {
+      const title = lesson.title || '';
+      const titleKo = lesson.titleKo || '';
+      const items = keywordCache.get(lesson.videoId)?.items || pickKeywords(lesson, { meanings });
+      items.forEach((it) => (it.videoId = lesson.videoId));
+      keywordCache.set(lesson.videoId, { items, title, titleKo });
+      return { videoId: lesson.videoId, title, titleKo, sentences: lesson.sentences.length, words: items.length, at: at(lesson) };
+    });
+    return storyList;
+  })().finally(() => (storyJob = null));
+  return storyJob;
 }
 
-/** 이야기 단어장에 없던 단어의 뜻만 받아 채운다 (받은 뜻은 저장해 다음에 다시 쓴다) */
-async function fillTopicMeanings(topic) {
-  const need = topic.words.filter((w) => !w.ko);
-  if (!need.length) return 0;
-  const ko = await translateMany(need.map((w) => w.word), () => {}, { word: true, title: topic.name });
-  const cache = (await db.get(MEANS_KEY)) || {};
-  let n = 0;
-  need.forEach((w, k) => {
-    if (!ko[k]) return;
-    w.ko = ko[k];
-    cache[w.word] = { word: w.word, ko: ko[k], ipa: w.ipa, level: w.level };
-    n++;
-  });
-  if (n) await db.set(MEANS_KEY, cache);
-  return n;
+/** 이야기 한 편의 핵심단어 (목록을 아직 안 만들었으면 그 이야기만 뽑는다) */
+async function keywordsOf(videoId) {
+  if (keywordCache.has(videoId)) return keywordCache.get(videoId);
+  await loadWordData();
+  const lesson = await getLesson(videoId);
+  if (!lesson) throw new Error('저장된 학습 자료가 없어요. 이야기를 먼저 열어 주세요.');
+  const meanings = { ...((await db.get(MEANS_KEY)) || {}) };
+  for (const w of wordList()) if (w.ko && !meanings[w.word]) meanings[w.word] = w;
+  const items = pickKeywords(lesson, { meanings });
+  items.forEach((it) => (it.videoId = videoId));
+  const entry = { items, title: lesson.title || '', titleKo: lesson.titleKo || '' };
+  keywordCache.set(videoId, entry);
+  return entry;
 }
 
 /**
- * 모아 온 문장 중 해석이 비어 있는 것만 받아 채운다.
- * 받은 해석은 원래 이야기에도 저장해, 그 이야기를 열었을 때도 채워져 있게 한다.
+ * 비어 있는 단어 뜻·문장 해석만 받아 채운다.
+ * 받은 뜻은 저장해 두고, 문장 해석은 원래 이야기에도 저장한다 (그 이야기를 열어도 채워져 보이게).
  */
-async function fillTopicKo(topic) {
-  const holes = topic.sentences.filter((s) => !s.ko);
-  if (!holes.length) return 0;
-  const ko = await translateMany(holes.map((s) => s.en), () => {}, { title: topic.name });
-  const byVideo = new Map();
-  let n = 0;
-  holes.forEach((s, k) => {
-    if (!ko[k]) return;
-    s.ko = ko[k];
-    n++;
-    if (!s.videoId || s.si == null) return;
-    byVideo.set(s.videoId, [...(byVideo.get(s.videoId) || []), s]);
-  });
-  for (const [videoId, list] of byVideo) {
-    const lesson = await getLesson(videoId);
-    if (!lesson) continue;
-    let touched = false;
-    for (const s of list) {
-      const target = lesson.sentences[s.si];
-      if (target && !target.ko && target.en === s.en) {
-        target.ko = s.ko;
-        touched = true;
+async function fillKeywordGaps(videoId, items, title) {
+  const needWord = items.filter((it) => !it.ko);
+  const needSent = items.filter((it) => !it.enKo);
+  let gotWord = 0;
+  let gotSent = 0;
+
+  if (needWord.length) {
+    const ko = await translateMany(needWord.map((it) => it.word), () => {}, { word: true, title });
+    const cache = (await db.get(MEANS_KEY)) || {};
+    needWord.forEach((it, k) => {
+      if (!ko[k]) return;
+      it.ko = ko[k];
+      cache[it.word] = { word: it.word, ko: ko[k], ipa: it.ipa, level: it.level };
+      gotWord++;
+    });
+    if (gotWord) await db.set(MEANS_KEY, cache);
+  }
+
+  if (needSent.length) {
+    const ko = await translateMany(needSent.map((it) => it.en), () => {}, { title });
+    needSent.forEach((it, k) => {
+      if (!ko[k]) return;
+      it.enKo = ko[k];
+      gotSent++;
+    });
+    if (gotSent) {
+      const lesson = await getLesson(videoId);
+      let touched = false;
+      for (const it of needSent) {
+        const target = lesson?.sentences?.[it.si];
+        if (it.enKo && target && !target.ko && target.en === it.en) {
+          target.ko = it.enKo;
+          touched = true;
+        }
+      }
+      if (touched) {
+        await saveLesson(videoId, lesson);
+        lessons.delete(videoId); // 그 이야기를 다시 열면 채워진 해석을 읽게
       }
     }
-    if (touched) {
-      await saveLesson(videoId, lesson);
-      lessons.delete(videoId); // 그 이야기를 다시 열면 채워진 해석을 읽게
-    }
   }
-  return n;
+  return { gotWord, gotSent, needWord: needWord.length, needSent: needSent.length };
 }
 
-/** 홈 화면의 주제 바로가기 */
-async function paintTopicStrip() {
-  if (!document.getElementById('topicStrip')) return;
-  const { topics, lessonCount } = await loadTopics();
-  const strip = document.getElementById('topicStrip');
+/** '단어 뜻 3개 · 문장 해석 2개' 처럼 아직 비어 있는 곳을 알려 준다 */
+function gapText(words, sentences) {
+  const parts = [];
+  if (words > 0) parts.push(`단어 뜻 ${words}개`);
+  if (sentences > 0) parts.push(`문장 해석 ${sentences}개`);
+  return parts.join(' · ') || '해석';
+}
+
+/** 홈 화면의 핵심단어 바로가기 */
+async function paintKeywordStrip() {
+  if (!document.getElementById('kwStrip')) return;
+  const stories = await loadStories();
+  const strip = document.getElementById('kwStrip');
   if (!strip) return; // 그 사이 다른 화면으로 옮겨 갔다
-  strip.innerHTML = topics.length
-    ? topics
-        .slice(0, 6)
+  strip.innerHTML = stories.length
+    ? stories
+        .slice(0, 5)
         .map(
-          (t) => `<a class="card topic-pill" href="#/topics/${esc(t.id)}">
-            <b>${t.emoji} ${esc(t.name)}</b><small>핵심단어 ${t.words.length} · 문장 ${t.sentences.length}</small></a>`,
+          (s) => `<a class="card kw-pill" href="#/keywords/${esc(s.videoId)}">
+            <b>${esc(s.titleKo || s.title)}</b><small>핵심단어 ${s.words} · 문장 ${s.words}</small></a>`,
         )
-        .join('') + `<a class="card topic-pill more" href="#/topics"><b>＋</b><small>주제 모두 보기</small></a>`
-    : `<div class="card topic-pill empty"><b>아직 모은 주제가 없어요</b>
-        <small>${lessonCount ? '이야기를 더 열면 주제별 단어가 모여요' : '이야기를 하나 열면 주제별 핵심단어를 자동으로 뽑아 줘요'}</small></div>`;
+        .join('') + `<a class="card kw-pill more" href="#/keywords"><b>＋</b><small>모두 보기</small></a>`
+    : `<div class="card kw-pill empty"><b>아직 뽑아 둔 핵심단어가 없어요</b>
+        <small>이야기를 하나 열면 어려운 단어 ${KEYWORD_COUNT}개와 문장을 자동으로 뽑아 줘요</small></div>`;
 }
 
-/** 주제 목록 화면 */
-async function renderTopics(id, tab) {
-  if (id) return renderTopic(id, tab);
+/** 핵심단어 목록 화면 (최신 이야기부터) */
+async function renderKeywords(id) {
+  if (id) return renderStoryKeywords(id);
   const token = routeToken;
   $view.innerHTML = `
-    <div class="eyebrow">Topics</div>
-    <h1 class="display">주제별 핵심단어</h1>
-    <p class="muted" style="font-size:13.5px;margin:6px 0 0">최신 영상부터 훑어 주제를 찾고, 주제마다 핵심단어 ${TOPIC_WORDS}개와
-      그 단어가 나오는 문장을 모았어요. 단어 · 문장 · 퀴즈로 이어서 공부하세요.</p>
-    <p class="muted" id="topicNote" style="font-size:12.5px;margin:6px 0 0"></p>
-    <div id="topicList" style="margin-top:18px">${'<div class="skeleton"></div>'.repeat(4)}</div>`;
-  const { topics, lessonCount, usedCount } = await loadTopics();
+    <div class="eyebrow">Keywords</div>
+    <h1 class="display">핵심단어</h1>
+    <p class="muted" style="font-size:13.5px;margin:6px 0 0">최신 이야기부터, 이야기마다 <b>어려운 단어 ${KEYWORD_COUNT}개</b>와
+      그 단어가 들어간 문장을 뽑았어요. <b>단어 → 뜻 → 문장 → 뜻</b> 순서로 반복해 들을 수 있어요.</p>
+    <div id="storyList" style="margin-top:18px">${'<div class="skeleton"></div>'.repeat(4)}</div>`;
+  const stories = await loadStories();
   if (token !== routeToken) return;
-  const note = document.getElementById('topicNote');
-  if (note && usedCount)
-    note.textContent =
-      lessonCount > usedCount
-        ? `최신 이야기 ${usedCount}편 기준이에요 (저장된 ${lessonCount}편 중 오래된 편은 빼고 모았어요).`
-        : `최신 이야기 ${usedCount}편을 기준으로 모았어요.`;
-  const el = document.getElementById('topicList');
+  const el = document.getElementById('storyList');
   if (!el) return;
-  if (!topics.length) {
-    el.innerHTML = `<div class="empty">${icon.book}
-      <div>${lessonCount ? '주제로 묶을 만한 문장을 아직 찾지 못했어요' : '먼저 이야기를 열어 학습 자료를 만들어 주세요'}</div>
+  if (!stories.length) {
+    el.innerHTML = `<div class="empty">${icon.book}<div>먼저 이야기를 열어 학습 자료를 만들어 주세요</div>
       <a class="btn" href="#/" style="margin-top:12px">이야기 목록으로</a></div>`;
     return;
   }
-  el.innerHTML = `<div class="stories">${topics
-    .map((t) => {
-      const p = progress[topicKey(t.id)];
-      const pct = p?.total ? Math.round((p.learned.length / p.total) * 100) : 0;
-      const cls = pct >= 100 ? 'done' : pct > 0 ? 'started' : '';
-      return `<a class="card story topic ${cls}" href="#/topics/${esc(t.id)}">
-        <div class="num">${t.emoji}</div>
-        <div>
-          <div class="t">${esc(t.name)}</div>
-          <div class="ko">${esc(t.words.slice(0, 5).map((w) => w.word).join(' · '))}</div>
-          <div class="meta">
-            <span class="chip accent">핵심단어 ${t.words.length}</span>
-            <span class="chip">문장 ${t.sentences.length}</span>
-            ${pct ? `<span class="chip ${pct >= 100 ? 'good' : 'accent'}">${pct >= 100 ? '완료' : `${p.learned.length}/${p.total}문장`}</span><div class="bar"><i style="width:${pct}%"></i></div>` : ''}
-          </div>
+  el.innerHTML = `<div class="stories">${stories
+    .map(
+      (s, k) => `<a class="card story" href="#/keywords/${esc(s.videoId)}">
+      <div class="num">${k + 1}</div>
+      <div>
+        <div class="t">${esc(s.title)}</div>
+        ${s.titleKo ? `<div class="ko">${esc(s.titleKo)}</div>` : ''}
+        <div class="meta">
+          <span class="chip accent">핵심단어 ${s.words}</span>
+          <span class="chip">문장 ${s.words}</span>
+          <span class="chip">이야기 문장 ${s.sentences}</span>
         </div>
-      </a>`;
-    })
+      </div>
+    </a>`,
+    )
     .join('')}</div>`;
 }
 
-/** 주제 학습 화면: 핵심단어 20개 · 관련 문장 · 퀴즈 */
-async function renderTopic(id, tab) {
+/** 이야기 한 편의 핵심단어 화면 */
+async function renderStoryKeywords(videoId) {
   const token = routeToken;
   $view.innerHTML = `
-    <div class="topbar"><a class="icon-btn" href="#/topics" aria-label="주제 목록으로">${icon.back}</a><div class="title">주제별 학습</div></div>
-    <div class="card loading"><div class="book">${icon.book}</div><b>주제별 핵심단어를 모으고 있어요</b>
-      <div class="muted" style="font-size:13px">저장해 둔 이야기에서 단어와 문장을 고르는 중…</div></div>`;
-  const { topics } = await loadTopics();
-  if (token !== routeToken) return;
-  const topic = topics.find((t) => t.id === id);
-  if (!topic) {
-    toast('아직 모으지 못한 주제예요');
-    location.hash = '#/topics';
+    <div class="topbar"><a class="icon-btn" href="#/keywords" aria-label="핵심단어 목록으로">${icon.back}</a><div class="title">핵심단어</div></div>
+    <div class="card loading"><div class="book">${icon.book}</div><b>핵심단어를 뽑고 있어요</b>
+      <div class="muted" style="font-size:13px">이야기에서 어려운 단어와 문장을 고르는 중…</div></div>`;
+  let items;
+  let title;
+  let titleKo;
+  try {
+    ({ items, title, titleKo } = await keywordsOf(videoId));
+  } catch (err) {
+    if (token !== routeToken) return;
+    $view.querySelector('.loading').innerHTML = `<div class="book">${icon.book}</div><b>핵심단어를 뽑지 못했어요</b>
+      <p class="muted">${esc(err.message)}</p><a class="btn" href="#/lesson/${esc(videoId)}">이야기 열기</a>`;
     return;
   }
-
-  // 레슨과 같은 모양으로 만들어 단어·문장·퀴즈 학습을 그대로 쓴다
-  const lesson = {
-    videoId: topicKey(topic.id),
-    title: `${topic.emoji} ${topic.name}`,
-    titleKo: '',
-    sentences: topic.sentences,
-    vocab: topic.words,
-    expressions: [],
-  };
-  const p = (progress[lesson.videoId] ||= { learned: [], total: 0 });
-  // 이야기가 늘면 모아 온 문장도 달라지므로, 문장 묶음이 바뀌면 익힘 표시를 비운다 (엉뚱한 문장에 붙지 않게)
-  const sig = `${lesson.sentences.length}:${lesson.sentences[0]?.en.slice(0, 40) || ''}:${lesson.sentences.at(-1)?.en.slice(0, 40) || ''}`;
-  if (p.sig && p.sig !== sig) p.learned = [];
-  Object.assign(p, { title: topic.name, titleKo: '', total: lesson.sentences.length, topic: true, sig });
-  saveProgress();
+  if (token !== routeToken) return;
+  title = title || titleOf(videoId) || '';
+  titleKo = titleKo || progress[videoId]?.titleKo || '';
+  if (!items.length) {
+    $view.querySelector('.loading').innerHTML = `<div class="book">${icon.book}</div><b>뽑을 만한 어려운 단어가 없어요</b>
+      <p class="muted">문장이 너무 짧거나 쉬운 단어만 있는 이야기예요.</p><a class="btn" href="#/keywords">목록으로</a>`;
+    return;
+  }
   markStudied();
 
-  const stories = new Set(topic.sentences.map((s) => s.videoId)).size;
-  const needWord = topic.words.filter((w) => !w.ko).length;
-  const needSent = topic.sentences.filter((s) => !s.ko).length;
-  tab = tab || p.lastTab || 'vocab';
-  $view.innerHTML = `
-    <div class="topbar"><a class="icon-btn" href="#/topics" aria-label="주제 목록으로">${icon.back}</a><div class="title">${esc(topic.name)}</div></div>
-    <div class="lesson-head">
-      <div class="eyebrow">주제별 핵심단어 · 최신 이야기 ${stories}편에서</div>
-      <h1>${topic.emoji} ${esc(topic.name)}</h1>
-      <p>핵심단어 ${topic.words.length}개 · 관련 문장 ${topic.sentences.length}개</p>
-      ${needWord || needSent ? `<div class="card" id="meanCard" style="margin-top:12px;padding:12px 14px;font-size:13px">${esc(fillText(needWord, needSent))}를 받아오는 중…</div>` : ''}
-    </div>
-    <div class="tabs" role="tablist" style="grid-template-columns:repeat(3,1fr)">
-      ${[
-        ['vocab', '핵심단어'],
-        ['sentences', '문장'],
-        ['quiz', '퀴즈'],
-      ]
-        .map(([k, l]) => `<button role="tab" data-tab="${k}" class="${k === tab ? 'on' : ''}" aria-selected="${k === tab}">${l}</button>`)
-        .join('')}
-    </div>
-    <section id="pane"></section>`;
-
-  let firstPane = true;
-  const showTab = (k) => {
-    player.stop(true);
-    tts.stop();
-    p.lastTab = k;
-    saveProgress();
-    document.querySelectorAll('.tabs button').forEach((b) => {
-      b.classList.toggle('on', b.dataset.tab === k);
-      b.setAttribute('aria-selected', b.dataset.tab === k);
-    });
-    const pane = document.getElementById('pane');
-    if (k === 'sentences') paneSentences(pane, lesson, p, firstPane);
-    else if (k === 'quiz') paneQuiz(pane, lesson, p);
-    else paneVocab(pane, lesson);
-    firstPane = false;
+  const gaps = { word: items.filter((it) => !it.ko).length, sent: items.filter((it) => !it.enKo).length };
+  const paint = () => {
+    document.getElementById('kwList').innerHTML = items
+      .map((it) => keywordCard(it))
+      .join('');
   };
-  document.querySelector('.tabs').addEventListener('click', (e) => {
-    const b = e.target.closest('button[data-tab]');
-    if (b) showTab(b.dataset.tab);
-  });
-  showTab(tab);
+  $view.innerHTML = `
+    <div class="topbar"><a class="icon-btn" href="#/keywords" aria-label="핵심단어 목록으로">${icon.back}</a><div class="title">${esc(title)}</div></div>
+    <div class="lesson-head">
+      <div class="eyebrow">스토리별 핵심단어</div>
+      <h1>${esc(title)}</h1>
+      ${titleKo ? `<p>${esc(titleKo)}</p>` : ''}
+      <p class="muted" style="font-size:13px">어려운 단어 ${items.length}개 · 그 단어가 들어간 문장 ${items.length}개</p>
+      ${gaps.word || gaps.sent ? `<div class="card" id="gapCard" style="margin-top:12px;padding:12px 14px;font-size:13px">${esc(gapText(gaps.word, gaps.sent))}를 받아오는 중…</div>` : ''}
+    </div>
+    <div class="tools">
+      <button class="btn primary grow" id="drillAll">${icon.play} 반복 듣기 (단어 → 뜻 → 문장 → 뜻)</button>
+      <a class="btn ghost" href="#/lesson/${esc(videoId)}">이야기 열기</a>
+    </div>
+    <div class="vocab-list" id="kwList"></div>`;
+  paint();
 
-  // 비어 있는 단어 뜻·예문 해석은 뒤에서 받아 채운다 (받은 해석은 원래 이야기에도 저장)
-  if (needWord || needSent)
-    (async () => {
-      const gotWord = needWord ? await fillTopicMeanings(topic) : 0;
-      const gotSent = needSent ? await fillTopicKo(topic) : 0;
-      if (token !== routeToken) return;
-      const left = needWord - gotWord + (needSent - gotSent);
-      const card = document.getElementById('meanCard');
-      if (left && card) card.textContent = `${fillText(needWord - gotWord, needSent - gotSent)}는 아직 받지 못했어요. 잠시 뒤 다시 열어 보세요.`;
-      else card?.remove();
-      // 받아 온 뜻·해석을 지금 보고 있는 탭에 바로 반영
-      if (gotWord || gotSent) {
-        const now = document.querySelector('.tabs button.on')?.dataset.tab;
-        if (now === 'vocab') paneVocab(document.getElementById('pane'), lesson);
-        else if (now === 'sentences' && gotSent) paneSentences(document.getElementById('pane'), lesson, p, false);
-      }
-    })().catch((err) => {
-      const card = document.getElementById('meanCard');
-      if (card) card.textContent = `뜻·해석을 받지 못했어요 (${err.message})`;
-    });
+  document.getElementById('drillAll').onclick = () => openDrill(items, { title });
+  document.getElementById('kwList').addEventListener('click', (e) => {
+    const card = e.target.closest('.vcard');
+    const act = e.target.closest('[data-v]')?.dataset.v;
+    if (!card || !act) return;
+    const k = items.findIndex((x) => x.word === card.dataset.word);
+    const it = items[k];
+    if (!it) return;
+    if (act === 'say') tts.speak(it.word, { rate: 0.85 });
+    if (act === 'ex') tts.speak(it.en);
+    if (act === 'drill') openDrill(items, { title, start: k });
+    if (act === 'save') {
+      toggleSave({ ...it, example: it.en, exampleKo: it.enKo, videoId }, null);
+      card.outerHTML = keywordCard(it);
+    }
+  });
+
+  // 비어 있는 뜻·해석은 뒤에서 받아 채운다
+  if (gaps.word || gaps.sent)
+    fillKeywordGaps(videoId, items, title)
+      .then(({ gotWord, gotSent }) => {
+        if (token !== routeToken) return;
+        const left = gaps.word - gotWord + (gaps.sent - gotSent);
+        const card = document.getElementById('gapCard');
+        if (left && card) card.textContent = `${gapText(gaps.word - gotWord, gaps.sent - gotSent)}는 아직 받지 못했어요. 잠시 뒤 다시 열어 보세요.`;
+        else card?.remove();
+        if (gotWord || gotSent) paint();
+      })
+      .catch((err) => {
+        const card = document.getElementById('gapCard');
+        if (card) card.textContent = `뜻·해석을 받지 못했어요 (${err.message})`;
+      });
 }
 
-/** '단어 뜻 3개 · 예문 해석 2개' 처럼 아직 비어 있는 곳을 알려 준다 */
-function fillText(words, sentences) {
-  const parts = [];
-  if (words > 0) parts.push(`단어 뜻 ${words}개`);
-  if (sentences > 0) parts.push(`예문 해석 ${sentences}개`);
-  return parts.join(' · ') || '해석';
+/** 핵심단어 카드 (단어 + 뜻 + 그 단어가 들어간 문장) */
+function keywordCard(it) {
+  const saved = hasWord(it.word) && words[it.word];
+  const ex = it.en
+    .split(/\s+/)
+    .map((w) => (vocabFor({ vocab: [it] }, w) ? `<mark>${esc(w)}</mark>` : esc(w)))
+    .join(' ');
+  return `<article class="card vcard" data-word="${esc(it.word)}">
+    <div class="head">
+      <div class="grow">
+        <div class="word">${esc(it.word)}</div>
+        <div class="ipa">${esc(it.ipa)} ${it.pos ? `· ${esc(it.pos)}` : ''}</div>
+      </div>
+      ${it.level ? `<span class="chip accent">${esc(it.level)}</span>` : ''}
+      <button class="icon-btn" data-v="say" aria-label="발음 듣기">${icon.speaker}</button>
+    </div>
+    <div class="mean">${esc(it.ko)}</div>
+    ${it.def ? `<div class="def">${esc(it.def)}</div>` : ''}
+    <div class="ex">${ex}${it.enKo ? `<small>${esc(it.enKo)}</small>` : ''}</div>
+    <div class="foot">
+      <button class="btn" data-v="drill">${icon.repeat} 반복 듣기</button>
+      <button class="btn ghost" data-v="save">${saved ? icon.starFill : icon.star} ${saved ? '저장됨' : '단어장'}</button>
+      <button class="btn ghost" data-v="ex">${icon.speaker} 문장</button>
+    </div>
+  </article>`;
+}
+
+/* ───────────── 반복 듣기 (영어 단어 → 한국어 뜻 → 영어 문장 → 한국어 뜻) ───────────── */
+const DRILL_STEPS = [
+  { key: 'word', tag: '단어', ko: false, rate: 0.85 },
+  { key: 'ko', tag: '뜻', ko: true, rate: 1 },
+  { key: 'en', tag: '문장', ko: false, rate: 1 },
+  { key: 'enKo', tag: '해석', ko: true, rate: 1 },
+];
+const DRILL_REPEATS = [
+  [1, '1회'],
+  [2, '2회'],
+  [3, '3회'],
+  [5, '5회'],
+  [0, '계속'],
+];
+const STEP_GAP = 350; // 단계 사이 쉬는 시간(ms)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 한 단계 읽기. 음성이 끝나면 resolve (엔진이 답을 안 주면 글자 수만큼 기다렸다 넘어간다) */
+function sayOnce(text, opts) {
+  return Promise.race([
+    new Promise((res) => tts.speak(text, { ...opts, onend: res })),
+    sleep(Math.max(4000, text.length * 120)),
+  ]);
+}
+
+const drill = {
+  el: null,
+  items: [],
+  title: '',
+  i: 0,
+  rep: 0,
+  step: -1,
+  playing: false,
+  run: 0,
+
+  open(items, { title = '반복 듣기', start = 0 } = {}) {
+    this.close();
+    this.items = items.filter((it) => it.word);
+    if (!this.items.length) return toast('반복해 들을 단어가 없어요');
+    this.title = title;
+    this.i = Math.max(0, Math.min(start, this.items.length - 1));
+    this.rep = 0;
+    this.step = -1;
+    const el = document.createElement('div');
+    el.className = 'drill';
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-label', '반복 듣기');
+    el.innerHTML = `
+      <div class="drill-top">
+        <button class="icon-btn" data-d="close" aria-label="닫기">${icon.back}</button>
+        <div class="grow"><b>반복 듣기</b><small id="dTitle">${esc(this.title)}</small></div>
+        <span class="chip accent" id="dPos"></span>
+      </div>
+      <div class="card drill-card" id="dCard"></div>
+      <div class="drill-ctl">
+        <button class="icon-btn" data-d="prev" aria-label="이전 단어">${icon.prev}</button>
+        <button class="icon-btn main" data-d="toggle" aria-label="재생·일시정지">${icon.play}</button>
+        <button class="icon-btn" data-d="next" aria-label="다음 단어">${icon.next}</button>
+        <select data-d="repeat" aria-label="단어마다 반복 횟수" title="단어마다 반복 횟수">
+          ${DRILL_REPEATS.map(([n, l]) => `<option value="${n}" ${settings.drillRepeat == n ? 'selected' : ''}>${l}</option>`).join('')}
+        </select>
+        <button class="icon-btn ${settings.drillLoopAll ? 'on' : ''}" data-d="loopAll" aria-label="전체 반복" title="끝까지 들으면 처음부터">${icon.repeat}</button>
+      </div>
+      <div class="drill-opts">
+        <label><input type="checkbox" id="dKo" ${settings.drillKo ? 'checked' : ''} /> 한국어 뜻도 읽어 주기</label>
+        <span class="muted" id="dHint"></span>
+      </div>`;
+    document.body.appendChild(el);
+    this.el = el;
+    $app.classList.add('drilling');
+
+    el.addEventListener('click', (e) => {
+      const a = e.target.closest('[data-d]')?.dataset.d;
+      if (a === 'close') return this.close();
+      if (a === 'toggle') return this.playing ? this.pause() : this.play();
+      if (a === 'prev') return this.jump(this.i - 1);
+      if (a === 'next') return this.jump(this.i + 1);
+      if (a === 'loopAll') {
+        settings.drillLoopAll = !settings.drillLoopAll;
+        saveSettings();
+        e.target.closest('button').classList.toggle('on', settings.drillLoopAll);
+        toast(settings.drillLoopAll ? '전체 반복: 끝까지 들으면 처음부터 다시' : '전체 반복 끔');
+      }
+    });
+    el.querySelector('select').onchange = (e) => {
+      settings.drillRepeat = Number(e.target.value);
+      saveSettings();
+      this.rep = 0;
+      this.update();
+    };
+    el.querySelector('#dKo').onchange = (e) => {
+      settings.drillKo = e.target.checked;
+      saveSettings();
+      if (!settings.drillKo) toast('영어만 읽어 줘요 (뜻은 화면에 보입니다)');
+    };
+    this.update();
+    this.play();
+  },
+
+  /** 지금 단계 표시 */
+  update() {
+    if (!this.el) return;
+    const it = this.items[this.i];
+    const times = settings.drillRepeat;
+    this.el.querySelector('#dPos').textContent =
+      `${this.i + 1} / ${this.items.length}` + (times === 0 ? ' · 계속' : ` · ${Math.min(this.rep + 1, times || 1)}/${times}번째`);
+    this.el.querySelector('[data-d="toggle"]').innerHTML = this.playing ? icon.pause : icon.play;
+    this.el.querySelector('#dCard').innerHTML = `
+      <div class="dstep ${this.step === 0 ? 'on' : ''}"><span class="tag">단어</span>
+        <b class="word">${esc(it.word)}</b><span class="ipa">${esc(it.ipa || '')}</span></div>
+      <div class="dstep ${this.step === 1 ? 'on' : ''}"><span class="tag">뜻</span>
+        <b class="mean">${esc(it.ko || '뜻을 받는 중…')}</b></div>
+      <div class="dstep ${this.step === 2 ? 'on' : ''}"><span class="tag">문장</span>
+        <p class="en">${esc(it.en || '')}</p></div>
+      <div class="dstep ${this.step === 3 ? 'on' : ''}"><span class="tag">해석</span>
+        <p class="ko">${esc(it.enKo || '')}</p></div>`;
+    const hint = this.el.querySelector('#dHint');
+    if (hint) hint.textContent = this.playing ? '' : '▶ 를 누르면 이어서 들려줘요';
+  },
+
+  play() {
+    if (!this.el || this.playing) return;
+    this.playing = true;
+    this.update();
+    markStudied();
+    this.loop();
+  },
+
+  pause() {
+    this.playing = false;
+    this.run++;
+    tts.stop();
+    this.step = -1;
+    this.update();
+  },
+
+  jump(i) {
+    if (!this.el) return;
+    const was = this.playing;
+    this.run++;
+    tts.stop();
+    this.i = (i + this.items.length) % this.items.length;
+    this.rep = 0;
+    this.step = -1;
+    this.update();
+    if (was) {
+      this.playing = false;
+      this.play();
+    }
+  },
+
+  /** 한 벌(단어 → 뜻 → 문장 → 해석)을 정한 횟수만큼 되풀이하고 다음 단어로 */
+  async loop() {
+    const my = ++this.run;
+    const alive = () => this.el && this.playing && my === this.run;
+    while (alive()) {
+      const it = this.items[this.i];
+      for (let s = 0; s < DRILL_STEPS.length; s++) {
+        const st = DRILL_STEPS[s];
+        const text = String(it[st.key] || '').trim();
+        this.step = s;
+        this.update();
+        if (text && !(st.ko && !settings.drillKo)) await sayOnce(text, { ko: st.ko, rate: st.rate });
+        if (!alive()) return;
+        await sleep(STEP_GAP);
+        if (!alive()) return;
+      }
+      this.rep++;
+      const times = settings.drillRepeat;
+      if (times !== 0 && this.rep >= times) {
+        this.rep = 0;
+        if (this.i >= this.items.length - 1) {
+          if (!settings.drillLoopAll) {
+            this.playing = false;
+            this.step = -1;
+            this.update();
+            toast('반복 듣기를 마쳤어요');
+            return;
+          }
+          this.i = 0;
+        } else this.i++;
+      }
+      this.step = -1;
+      this.update();
+      await sleep((settings.gap ?? 0.8) * 1000);
+    }
+  },
+
+  close() {
+    this.run++;
+    this.playing = false;
+    tts.stop();
+    this.el?.remove();
+    this.el = null;
+    $app.classList.remove('drilling');
+  },
+};
+
+/** 단어 목록으로 반복 듣기 열기 (핵심단어·이야기 단어 탭·단어장 공용) */
+function openDrill(items, opts) {
+  drill.open(items, opts);
+}
+
+/** 이야기 단어장·내 단어장의 단어 → 반복 듣기 항목 */
+function toDrillItems(list, lesson) {
+  return list.map((v) => ({
+    word: v.word,
+    ipa: v.ipa || '',
+    ko: v.ko || '',
+    en: v.example || '',
+    enKo: lesson?.sentences?.[v.i]?.ko || v.exampleKo || '',
+  }));
 }
 
 /* ───────────── 내 단어장 ───────────── */
@@ -1468,6 +1702,7 @@ function renderWords(review) {
       </div>
     </div>
     <a class="btn primary block" href="#/words/review" ${list.some((w) => !w.known) ? '' : 'aria-disabled="true" style="pointer-events:none;opacity:.5"'}>플래시카드로 복습하기</a>
+    <button class="btn block" id="drillWords" style="margin-top:8px" ${list.length ? '' : 'disabled'}>${icon.repeat} 반복 듣기 (단어 → 뜻 → 문장 → 뜻)</button>
     <div class="vocab-list" id="wl" style="margin-top:14px"></div>`;
   const paint = () => {
     const items = list.filter((w) => filter === 'all' || (filter === 'known' ? w.known : !w.known));
@@ -1488,6 +1723,11 @@ function renderWords(review) {
     filter = b.dataset.f;
     document.querySelectorAll('[data-f]').forEach((x) => x.classList.toggle('on', x === b));
     paint();
+  };
+  // 지금 보고 있는 목록(전체·학습 중·외움)을 그대로 반복해 듣는다
+  document.getElementById('drillWords').onclick = () => {
+    const items = list.filter((w) => filter === 'all' || (filter === 'known' ? w.known : !w.known));
+    openDrill(toDrillItems(items, null), { title: '내 단어장' });
   };
   document.getElementById('wl').addEventListener('click', (e) => {
     const card = e.target.closest('.vcard');
@@ -1729,7 +1969,7 @@ function renderSettings() {
       () => stop,
     );
     lessons.clear();
-    resetTopics();
+    resetKeywords();
     toast(res.failed ? `${res.done - res.failed}편 바꿨어요 · ${res.failed}편 실패` : `${res.done}편을 LLM 해석으로 바꿨어요`);
     renderSettings();
   });
@@ -1766,7 +2006,7 @@ function renderSettings() {
     if (!confirm('저장된 학습 자료를 지울까요? (학습 기록·단어장은 남아요. 다시 열면 새로 만들어요)')) return;
     for (const k of await db.keys()) if (String(k).startsWith('lesson:')) await db.del(k);
     lessons.clear();
-    resetTopics();
+    resetKeywords();
     toast('학습 자료를 비웠어요');
     renderSettings();
   });
@@ -1822,6 +2062,17 @@ document.addEventListener('keydown', (e) => {
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   const page = location.hash.split('/')[1] || '';
 
+  // 반복 듣기 창: Space 재생·일시정지, ←→ 이전·다음 단어, Esc 닫기
+  if (drill.el) {
+    const act = { ' ': 'toggle', Enter: 'toggle', ArrowRight: 'next', ArrowLeft: 'prev', Escape: 'close' }[key];
+    if (!act) return;
+    e.preventDefault();
+    if (act === 'close') drill.close();
+    else if (act === 'toggle') drill.playing ? drill.pause() : drill.play();
+    else drill.jump(drill.i + (act === 'next' ? 1 : -1));
+    return;
+  }
+
   if (key === 'Escape') {
     if (document.querySelector('.sheet')) return closeSheet();
     if (page === 'lesson') location.hash = '#/';
@@ -1843,7 +2094,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  if (page !== 'lesson' && page !== 'topics') return;
+  if (page !== 'lesson' && page !== 'keywords') return;
   // 퀴즈: 1~4로 보기 선택, Space로 다시 듣기
   const options = document.querySelectorAll('.options:not(.done) button');
   if (options.length) {
@@ -1882,6 +2133,7 @@ if (isNative() && AppPlugin) {
   AppPlugin.addListener('resume', () => refreshChannel({ auto: true }));
   // 안드로이드 뒤로 가기: 창 닫기 → 이전 화면 → 목록에서는 앱을 뒤로 보내기
   AppPlugin.addListener('backButton', () => {
+    if (drill.el) return drill.close();
     if (document.querySelector('.sheet')) return closeSheet();
     const page = location.hash.split('/')[1] || '';
     if (page) history.length > 1 ? history.back() : (location.hash = '#/');
