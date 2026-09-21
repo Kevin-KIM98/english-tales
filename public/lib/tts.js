@@ -26,9 +26,15 @@ function describe(v) {
 
 export function createTTS(getSettings, toast) {
   let seq = 0;
-  let voices = []; // { id, name, lang, local, region, regionName, short, online }
+  let voices = []; // 영어 목소리 { id, name, lang, local, region, regionName, short, online }
+  let koVoices = []; // 한국어 목소리 (뜻 읽어 주기용)
   let loaded = null;
+  let koWarned = false;
 
+  const isEn = (lang) => /^en[-_]/i.test(lang || '');
+  const isKo = (lang) => /^ko[-_]/i.test(lang || '');
+
+  /** 기기에 있는 목소리 전부 (영어·한국어를 함께 받아 나눠 쓴다) */
   async function readVoices() {
     if (isNative() && plugin()) {
       const { voices: list } = await plugin().getSupportedVoices();
@@ -37,13 +43,13 @@ export function createTTS(getSettings, toast) {
       const seen = new Set();
       return list
         .map((v, index) => ({ id: String(index), name: v.voiceURI || v.name, lang: v.lang, local: v.localService }))
-        .filter((v) => /^en[-_]/i.test(v.lang) && !seen.has(v.name) && seen.add(v.name));
+        .filter((v) => (isEn(v.lang) || isKo(v.lang)) && !seen.has(v.lang + v.name) && seen.add(v.lang + v.name));
     }
     if (!('speechSynthesis' in globalThis)) return [];
     const read = () =>
       speechSynthesis
         .getVoices()
-        .filter((v) => v.lang.startsWith('en'))
+        .filter((v) => isEn(v.lang) || isKo(v.lang))
         .map((v) => ({ id: v.voiceURI, name: v.name, lang: v.lang, local: v.localService }));
     let list = read();
     if (!list.length) {
@@ -61,7 +67,8 @@ export function createTTS(getSettings, toast) {
     for (let i = 0; i < 4; i++) {
       const list = await readVoices().catch(() => []);
       if (list.length) {
-        voices = list.map((v) => ({ ...v, ...describe(v) }));
+        koVoices = list.filter((v) => isKo(v.lang));
+        voices = list.filter((v) => isEn(v.lang)).map((v) => ({ ...v, ...describe(v) }));
         // 지역마다 '고품질 먼저, 이름순'으로 번호를 붙여 목소리를 구별하기 쉽게 한다 (미국 1, 미국 2 …)
         const byRegion = new Map();
         for (const v of [...voices].sort((a, b) => b.online - a.online || a.short.localeCompare(b.short))) {
@@ -74,6 +81,7 @@ export function createTTS(getSettings, toast) {
       await new Promise((r) => setTimeout(r, 700));
     }
     loaded = null; // 다음에 다시 시도
+    koVoices = [];
     return (voices = []);
   }
   const ensure = () => (loaded ||= loadVoices());
@@ -88,13 +96,29 @@ export function createTTS(getSettings, toast) {
     );
   }
 
-  /** @param {{ rate?: number, onend?: Function, voiceId?: string }} opts voiceId: 미리 듣기용으로 특정 목소리 지정 */
-  async function speak(text, { rate = 1, onend, voiceId } = {}) {
+  /** 한국어 뜻을 읽어 줄 목소리 (없으면 undefined) */
+  const pickKo = () => koVoices[0];
+
+  /**
+   * @param {{ rate?: number, onend?: Function, voiceId?: string, ko?: boolean }} opts
+   *   voiceId: 미리 듣기용으로 특정 목소리 지정 · ko: 한국어(뜻)를 읽는다
+   */
+  async function speak(text, { rate = 1, onend, voiceId, ko = false } = {}) {
     const my = ++seq;
     const done = () => my === seq && onend?.();
     await ensure();
     if (my !== seq) return;
-    const v = pick(voiceId);
+    if (ko) {
+      // 한국어 음성이 없는 기기에서는 읽지 않고 그냥 넘어간다 (화면의 뜻은 그대로 보인다)
+      if (!pickKo()) {
+        if (!koWarned) {
+          koWarned = true;
+          toast?.('한국어 음성이 없어 뜻은 읽어 주지 못해요 · 설정 → 발음 → 음성 데이터');
+        }
+        return done();
+      }
+    }
+    const v = ko ? pickKo() : pick(voiceId);
     const r = getSettings().rate * rate;
     if (isNative() && plugin()) {
       try {
@@ -118,7 +142,10 @@ export function createTTS(getSettings, toast) {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     const sv = speechSynthesis.getVoices().find((x) => x.voiceURI === v?.id);
-    if (sv) u.voice = sv;
+    // 목소리 지정이 실패해도(목록이 바뀐 뒤 등) 언어만으로 읽게 둔다 — 여기서 예외가 나면 재생이 통째로 멈춘다
+    try {
+      if (sv) u.voice = sv;
+    } catch {}
     u.lang = v?.lang || 'en-US';
     u.rate = r;
     u.onend = done;
@@ -150,6 +177,8 @@ export function createTTS(getSettings, toast) {
     speak,
     stop,
     groups,
+    /** 한국어 뜻을 읽어 줄 수 있는 기기인가 (목록을 불러온 뒤에 정확하다) */
+    hasKo: () => Boolean(pickKo()),
     /** 현재 목소리 (목록을 아직 못 불러왔으면 undefined) */
     current: () => pick(),
     /** 화면 표시용 이름: '미국 2 · IOL (고품질)' — 목소리마다 다르게 */

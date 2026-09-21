@@ -7,7 +7,7 @@ import { loadWordData, lemma, levelOf, rankOf, ipaOf } from '../public/lib/words
 import { findExpressions, findTraps } from '../public/lib/expressions.js';
 import { normalizeChannelInput } from '../public/lib/youtube.js';
 import { resumeIndex } from '../public/lib/study.js';
-import { analyzeTopics, wordsOf, TOPIC_WORDS, TOPIC_LESSONS } from '../public/lib/topics.js';
+import { pickKeywords, wordsOf, KEYWORD_COUNT } from '../public/lib/keywords.js';
 import { ipaOf as arpabetToIpa } from '../scripts/ipa.mjs';
 import { alignSegments, translateMany, fillMissing, missingCount, setPacing } from '../public/lib/enrich.js';
 import { setTransport } from '../public/lib/net.js';
@@ -223,121 +223,82 @@ test('이어보기: 마지막 익힘 다음 문장부터', () => {
   assert.equal(resumeIndex(3, new Set([0])), 1); // Set 으로 넘겨도 된다
 });
 
-/* ── 주제별 핵심단어 ── */
-const topicStory = (lines, extra = {}) => ({
+/* ── 스토리별 핵심단어 ── */
+const story = (lines, extra = {}) => ({
   videoId: 'vid1',
-  title: '가족 이야기',
+  title: '이야기',
   sentences: lines.map((en, i) => ({ i, en, ko: `해석 ${i}` })),
   ...extra,
 });
 
-test('주제별 핵심단어: 문장을 주제로 나누고 단어·예문을 모은다', () => {
-  const lesson = topicStory(
-    [
-      'My sister called our mother from the hospital.',
-      'Her husband lost his job and could not pay the mortgage.',
-      'The lawyer said the inheritance would be split between us.',
-      'My brother was furious at the whole family.',
-      'I could not afford another loan on top of the rent.',
-    ],
-    { vocab: [{ word: 'inheritance', ko: '유산', level: 'C1' }] },
-  );
-  const topics = analyzeTopics([lesson]);
-  const family = topics.find((t) => t.id === 'family');
-  const money = topics.find((t) => t.id === 'money');
-  assert.ok(family && money);
-  assert.ok(family.words.some((w) => w.word === 'sister'));
-  assert.ok(money.words.some((w) => w.word === 'mortgage'));
-  // 뜻은 이야기 단어장에서 가져온다 (없으면 빈 채로 두고 앱이 나중에 채운다)
-  assert.equal(money.words.find((w) => w.word === 'inheritance')?.ko, '유산');
-  // 단어마다 그 단어가 실제로 나오는 문장을 예문으로 붙인다
-  for (const t of topics)
-    for (const w of t.words) {
-      assert.equal(w.example, t.sentences[w.i].en, `${t.id}/${w.word} 예문 번호`);
-      assert.ok(wordsOf(w.example).includes(w.word), `${t.id}/${w.word} 예문에 단어가 있어야 한다`);
-    }
-  // 문장에는 해석과 어느 이야기에서 왔는지가 함께 담긴다
-  assert.ok(family.sentences.every((s) => s.ko && s.videoId === 'vid1' && s.title === '가족 이야기'));
-  assert.deepEqual(
-    family.sentences.map((s) => s.i),
-    family.sentences.map((_, i) => i),
-  );
-});
-
-test('주제별 핵심단어: 개수를 넘지 않고, 주제 밖 문장은 넣지 않는다', () => {
-  const money = Array.from({ length: 40 }, (_, k) => `The bank charged a fee of ${k} dollars on the loan and the mortgage.`);
-  const off = ['A dragon flew over the silent mountain.'];
-  const topics = analyzeTopics([topicStory([...money, ...off])]);
-  const t = topics.find((x) => x.id === 'money');
-  assert.ok(t.words.length <= TOPIC_WORDS);
-  assert.equal(analyzeTopics([topicStory([...money, ...off])], { maxWords: 3 }).find((x) => x.id === 'money').words.length, 3);
-  assert.ok(!t.sentences.some((s) => s.en.includes('dragon')));
-  assert.ok(t.sentences.length <= 60);
-});
-
-test('주제별 핵심단어: 여러 이야기를 한데 모은다', () => {
-  const a = { videoId: 'a', title: '이야기 A', sentences: [{ i: 0, en: 'The teacher gave the student a scholarship.', ko: '가' }] };
-  const b = { videoId: 'b', title: '이야기 B', sentences: [{ i: 0, en: 'Tuition for the semester was due at the college.', ko: '나' }] };
-  const school = analyzeTopics([a, b]).find((t) => t.id === 'school');
-  assert.equal(new Set(school.sentences.map((s) => s.videoId)).size, 2);
-  assert.ok(school.words.some((w) => w.word === 'tuition'));
-  assert.equal(analyzeTopics([]).length, 0); // 저장된 이야기가 없으면 주제도 없다
-});
-
-test('주제별 핵심단어: 이름·너무 쉬운 단어는 빼고 사전형으로 모은다', () => {
-  const topics = analyzeTopics([
-    topicStory([
-      'Sarah told her mother about the wedding in Boston.',
-      'Her mothers were waiting because the families had already arrived.',
+test('핵심단어: 어려운 단어를 고르고 쉬운 말은 뺀다', () => {
+  const items = pickKeywords(
+    story([
+      'The mortgage payment was late again this month.',
+      'She could not afford the tuition for the semester.',
+      'He was furious about the inheritance.',
     ]),
-  ]);
-  const family = topics.find((t) => t.id === 'family');
-  const list = family.words.map((w) => w.word);
-  assert.ok(!list.includes('sarah') && !list.includes('boston')); // 이름·지명 제외
-  assert.ok(!list.includes('because')); // 너무 쉬운 단어 제외
-  assert.ok(list.includes('mother') && !list.includes('mothers')); // 활용형은 사전형으로 합친다
-  assert.equal(family.words.find((w) => w.word === 'mother').count, 2);
-});
-
-test('주제별 핵심단어: 최신 이야기의 단어가 앞에 온다', () => {
-  const story = (id, en) => ({ videoId: id, title: '이야기 ' + id, sentences: [{ i: 0, en, ko: '해석' }] });
-  const newer = story('new', 'The mortgage payment was late again this month.');
-  const older = story('old', 'The bank denied the loan and the debt kept growing.');
-  const order = (lessons) => analyzeTopics(lessons).find((t) => t.id === 'money').words.map((w) => w.word);
-  // 같은 이야기 둘을 순서만 바꿔 넣으면, 앞(최신)에 둔 이야기의 단어가 위로 온다
-  assert.ok(order([newer, older]).indexOf('mortgage') < order([newer, older]).indexOf('loan'));
-  assert.ok(order([older, newer]).indexOf('loan') < order([older, newer]).indexOf('mortgage'));
-  // 문장도 최신 이야기 것부터 모은다
-  const both = analyzeTopics([newer, older]).find((t) => t.id === 'money');
-  assert.deepEqual(
-    both.sentences.map((s) => s.videoId),
-    ['new', 'old'],
   );
+  const list = items.map((it) => it.word);
+  assert.ok(list.includes('mortgage') && list.includes('tuition') && list.includes('inheritance'));
+  assert.ok(!list.includes('about') && !list.includes('month') && !list.includes('this')); // 너무 쉬운 말
+  // 어려운 단어가 앞에 온다 (빈도 순위가 낮을수록 어렵다)
+  assert.ok(items[0].rank > items[items.length - 1].rank / 3);
+  assert.ok(items.every((it) => it.level && it.ipa !== undefined));
 });
 
-test('주제별 핵심단어: 오래된 이야기는 보지 않는다', () => {
-  const money = { videoId: 'new', title: '최신', sentences: [{ i: 0, en: 'The mortgage payment was late.', ko: '해석' }] };
-  const school = { videoId: 'old', title: '예전', sentences: [{ i: 0, en: 'Tuition for the semester was due.', ko: '해석' }] };
-  const ids = analyzeTopics([money, school], { maxLessons: 1 }).map((t) => t.id);
-  assert.deepEqual(ids, ['money']); // 최신 1편만 봤으니 예전 이야기의 주제는 나오지 않는다
-  assert.ok(analyzeTopics([money, school]).some((t) => t.id === 'school')); // 기본값 안에서는 둘 다
-  assert.ok(TOPIC_LESSONS >= 1);
+test('핵심단어: 개수는 20개까지, 단어마다 그 단어가 들어간 문장이 붙는다', () => {
+  const lines = Array.from({ length: 40 }, (_, k) => `The reluctant accountant audited the mortgage ledger number ${k}.`);
+  lines.push('A dragon circled the abandoned lighthouse.');
+  const items = pickKeywords(story(lines));
+  assert.equal(KEYWORD_COUNT, 20);
+  assert.ok(items.length <= KEYWORD_COUNT);
+  for (const it of items) {
+    assert.ok(wordsOf(it.en).includes(it.word), `${it.word} 예문에 단어가 있어야 한다`);
+    assert.equal(it.en, story(lines).sentences[it.si].en); // 원래 이야기의 몇 번째 문장인지도 함께
+  }
+  assert.equal(pickKeywords(story(lines), { maxWords: 3 }).length, 3);
+  assert.equal(pickKeywords({ sentences: [] }).length, 0);
 });
 
-test('주제별 핵심단어: 예문은 해석이 있는 문장을 먼저 고르고, 문장 번호를 실어 준다', () => {
+test('핵심단어: 문장은 되도록 겹치지 않게, 해석이 있는 문장을 먼저 고른다', () => {
   const lesson = {
     videoId: 'v',
     title: '이야기',
     sentences: [
-      { i: 0, en: 'The mortgage was the reason for the argument.', ko: '' }, // 해석이 비어 있는 줄
+      { i: 0, en: 'The mortgage and the tuition arrived together.', ko: '' }, // 해석이 빈 줄
       { i: 1, en: 'He could not pay the mortgage that winter.', ko: '그해 겨울 그는 대출금을 내지 못했다.' },
+      { i: 2, en: 'Her tuition was due before the semester.', ko: '학기 전에 등록금 납부일이 되었다.' },
     ],
   };
-  const money = analyzeTopics([lesson]).find((t) => t.id === 'money');
-  const mortgage = money.words.find((w) => w.word === 'mortgage');
-  assert.equal(money.sentences[mortgage.i].ko, '그해 겨울 그는 대출금을 내지 못했다.');
-  // 원래 이야기의 몇 번째 문장인지 함께 준다 (앱이 받아 온 해석을 그 이야기에 되돌려 저장한다)
-  for (const s of money.sentences) assert.equal(s.en, lesson.sentences[s.si].en);
+  const items = pickKeywords(lesson);
+  const at = (w) => items.find((it) => it.word === w);
+  assert.equal(at('mortgage').si, 1); // 해석이 있는 문장으로
+  assert.equal(at('tuition').si, 2); // 앞 단어가 쓴 문장은 피해서
+  // 해석이 있는 문장이 하나라도 있으면 해석이 빈 문장을 예문으로 쓰지 않는다
+  for (const it of items) {
+    const alts = lesson.sentences.filter((x) => wordsOf(x.en).includes(it.word));
+    if (alts.some((x) => x.ko)) assert.ok(lesson.sentences[it.si].ko, `${it.word} 예문에는 해석이 있어야 한다`);
+  }
+});
+
+test('핵심단어: 이름은 빼고 사전형으로 모으며, 뜻은 이야기 단어장에서 가져온다', () => {
+  const lesson = story(
+    [
+      'Sarah signed the mortgage papers in Boston.',
+      'The mortgages were bundled by the reluctant accountant.',
+    ],
+    { vocab: [{ word: 'mortgage', ko: '주택담보대출', pos: 'n.' }] },
+  );
+  const items = pickKeywords(lesson);
+  const list = items.map((it) => it.word);
+  assert.ok(!list.includes('sarah') && !list.includes('boston')); // 이름·지명 제외
+  assert.ok(list.includes('mortgage') && !list.includes('mortgages')); // 활용형은 사전형으로
+  assert.equal(items.find((it) => it.word === 'mortgage').ko, '주택담보대출');
+  assert.equal(items.find((it) => it.word === 'mortgage').count, 2);
+  // 뜻을 모르면 빈 채로 둔다 (앱이 열 때 받아 채운다)
+  assert.equal(items.find((it) => it.word === 'accountant').ko, '');
+  assert.equal(pickKeywords(lesson, { meanings: { accountant: { ko: '회계사' } } }).find((it) => it.word === 'accountant').ko, '회계사');
 });
 
 /* ── 해석 엔진 (LLM) ── */
