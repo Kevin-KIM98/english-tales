@@ -398,3 +398,16 @@ kbd { font: 600 11px/1 var(--sans); padding: 3px 6px; border-radius: 6px; border
 @media (min-width: 960px) { .voice-sheet { max-height: 80vh; } }
 
 .voice-pick .vcode { font-size: 12px; margin-left: 4px; }
+
+/* ── 주제별 핵심단어 ── */
+.topic-strip { display: flex; gap: 10px; margin-top: 4px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+.topic-strip::-webkit-scrollbar { display: none; }
+.topic-pill { flex: 0 0 auto; min-width: 148px; max-width: 220px; padding: 12px 14px; text-decoration: none; color: inherit; }
+.topic-pill b { display: block; font: 600 15px/1.35 var(--serif); }
+.topic-pill small { display: block; margin-top: 4px; font-size: 12px; color: var(--ink-3); }
+.topic-pill.more { display: flex; flex-direction: column; justify-content: center; align-items: center; min-width: 92px; color: var(--ink-3); }
+.topic-pill.more b { font-size: 18px; }
+.topic-pill.empty { flex: 1 1 auto; }
+.story.topic .num { font-size: 20px; line-height: 40px; }
+.sent .src { font-size: 12px; color: var(--ink-3); display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
+.sent .src svg { width: 13px; height: 13px; }
