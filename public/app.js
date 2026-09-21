@@ -2,7 +2,9 @@
 // 서버 없이 휴대폰 안에서 채널 목록·자막·해석·단어를 모두 처리한다.
 import { getChannel, getMoreVideos } from './lib/youtube.js';
 import { buildLesson, getLesson, refillLesson, upgradeLesson, upgradeAllLessons, basicLessonIds, missingCount, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
-import { define } from './lib/enrich.js';
+import { define, translateMany } from './lib/enrich.js';
+import { analyzeTopics, TOPIC_WORDS } from './lib/topics.js';
+import { loadWordData } from './lib/words.js';
 import { findTraps } from './lib/expressions.js';
 import { resumeIndex } from './lib/study.js';
 import { setEngine, engineReady, checkKey, KEY_HELP } from './lib/llm.js';
@@ -135,9 +137,10 @@ function route() {
   const hash = location.hash.slice(1) || '/';
   const [, page, id, tab] = hash.split('/');
   document.querySelectorAll('.tabbar a').forEach((a) => a.classList.toggle('on', a.dataset.nav === (page || 'home')));
-  $app.classList.toggle('immersive', page === 'lesson');
+  $app.classList.toggle('immersive', page === 'lesson' || (page === 'topics' && Boolean(id)));
   window.scrollTo(0, 0);
   if (page === 'lesson' && id) return renderLesson(id, tab);
+  if (page === 'topics') return renderTopics(id, tab);
   if (page === 'words') return renderWords(id === 'review');
   if (page === 'settings') return renderSettings();
   renderHome();
@@ -247,6 +250,7 @@ function prefetchLessons(videos) {
     const p = (progress[v.id] ||= { learned: [], total: 0 });
     Object.assign(p, { titleKo: lesson.titleKo, total: lesson.sentences.length, title: lesson.title });
     saveProgress();
+    resetTopics();
     if ((location.hash.split('/')[1] || '') === '') renderHome();
   });
 }
@@ -299,7 +303,7 @@ function storyStatus(v) {
 }
 
 function renderHome(error) {
-  const learnedTotal = Object.values(progress).reduce((n, p) => n + (p.learned?.length || 0), 0);
+  const learnedTotal = Object.entries(progress).reduce((n, [id, p]) => (isTopicId(id) ? n : n + (p.learned?.length || 0)), 0);
   const ch = channelData?.source === settings.channel ? channelData : null;
   const checked = ch?.checkedAt ? new Date(ch.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 
@@ -324,6 +328,9 @@ function renderHome(error) {
       <div class="card stat"><b>${wordList().length}</b><span>저장한 단어</span></div>
       <div class="card stat"><b>${streak()}일</b><span>연속 학습</span></div>
     </div>
+    <h2 class="section"><span>주제별 핵심단어</span>
+      <a class="btn ghost" href="#/topics" style="min-height:32px;padding:0 10px;font-size:12.5px">모두 보기</a></h2>
+    <div class="topic-strip" id="topicStrip"><div class="skeleton" style="height:70px"></div></div>
     <label class="search">${icon.search}<input id="q" type="search" placeholder="제목으로 찾기" value="${esc(homeFilter)}" aria-label="제목 검색" /></label>
     <div class="sortbar" role="group" aria-label="정렬">
       <button data-sort="new" class="${settings.sort !== 'old' ? 'on' : ''}">최신순</button>
@@ -403,6 +410,7 @@ function renderHome(error) {
     if (channelData?.source === settings.channel) paint();
   });
   document.getElementById('doUpdate')?.addEventListener('click', (e) => runUpdate(e.currentTarget));
+  paintTopicStrip();
   if (checking) setRefreshing(true);
   if (ch) paint();
   else if (!error) refreshChannel();
@@ -442,7 +450,9 @@ const lessons = new Map();
 
 async function fetchLesson(id, title, onWait) {
   if (lessons.has(id)) return lessons.get(id);
-  const lesson = (await getLesson(id)) || (await buildLesson(id, title, onWait));
+  const stored = await getLesson(id);
+  const lesson = stored || (await buildLesson(id, title, onWait));
+  if (!stored) resetTopics(); // 새 이야기가 생겼으니 주제별 단어를 다시 모은다
   lessons.set(id, lesson);
   return lesson;
 }
@@ -652,6 +662,7 @@ function paneSentences(pane, lesson, p, announce) {
         .map(
           (s) => `<article class="card sent ${learned.has(s.i) ? 'learned' : ''}" id="s${s.i}" data-i="${s.i}">
           <div class="no"><span>${String(s.i + 1).padStart(2, '0')}</span><span class="check">${learned.has(s.i) ? '✓ 익힘' : ''}</span></div>
+          ${s.title ? `<div class="src">${icon.book} ${esc(s.title)}</div>` : ''}
           <div class="en">${sentenceHTML(lesson, s)}</div>
           <div class="ko ${hideKo ? 'hidden' : ''}">${esc(s.ko)}</div>
           ${tipsHTML(s.en)}
@@ -1172,6 +1183,210 @@ async function openWordSheet(token, lesson) {
   bindVocabActions(sheet, () => [v], lesson);
 }
 
+/* ───────────── 주제별 핵심단어 ─────────────
+   저장해 둔 이야기들을 훑어 주제(가족·돈·직장 …)를 나누고, 주제마다 핵심단어 20개와
+   그 단어가 나오는 문장을 모아 준다. 레슨 화면과 같은 단어·문장·퀴즈 학습을 그대로 쓴다. */
+const MEANS_KEY = 'wordMeanings'; // 주제 단어의 한국어 뜻 캐시 (한 번 받으면 다시 받지 않는다)
+const topicKey = (id) => 'topic:' + id;
+const isTopicId = (id) => String(id).startsWith('topic:');
+
+let topicCache = null; // { topics, lessonCount }
+let topicJob = null;
+/** 이야기가 늘거나 해석이 바뀌면 다음에 열 때 다시 모은다 */
+function resetTopics() {
+  topicCache = null;
+}
+
+/** 저장된 이야기 전부 → 주제별 핵심단어·문장 (한 번 계산해 두고 재사용) */
+function loadTopics() {
+  if (topicCache) return Promise.resolve(topicCache);
+  if (topicJob) return topicJob;
+  topicJob = (async () => {
+    await loadWordData();
+    const lessons = [];
+    for (const k of await db.keys()) {
+      if (!String(k).startsWith('lesson:')) continue;
+      const lesson = await db.get(k);
+      if (lesson?.sentences?.length) lessons.push(lesson);
+    }
+    // 이미 알고 있는 뜻(단어장·전에 받아 둔 뜻)은 다시 번역하지 않는다
+    const meanings = { ...((await db.get(MEANS_KEY)) || {}) };
+    for (const w of wordList()) if (w.ko && !meanings[w.word]) meanings[w.word] = w;
+    topicCache = { topics: analyzeTopics(lessons, { meanings }), lessonCount: lessons.length };
+    return topicCache;
+  })().finally(() => (topicJob = null));
+  return topicJob;
+}
+
+/** 이야기 단어장에 없던 단어의 뜻만 받아 채운다 (받은 뜻은 저장해 다음에 다시 쓴다) */
+async function fillTopicMeanings(topic) {
+  const need = topic.words.filter((w) => !w.ko);
+  if (!need.length) return 0;
+  const ko = await translateMany(need.map((w) => w.word), () => {}, { word: true, title: topic.name });
+  const cache = (await db.get(MEANS_KEY)) || {};
+  let n = 0;
+  need.forEach((w, k) => {
+    if (!ko[k]) return;
+    w.ko = ko[k];
+    cache[w.word] = { word: w.word, ko: ko[k], ipa: w.ipa, level: w.level };
+    n++;
+  });
+  if (n) await db.set(MEANS_KEY, cache);
+  return n;
+}
+
+/** 홈 화면의 주제 바로가기 */
+async function paintTopicStrip() {
+  if (!document.getElementById('topicStrip')) return;
+  const { topics, lessonCount } = await loadTopics();
+  const strip = document.getElementById('topicStrip');
+  if (!strip) return; // 그 사이 다른 화면으로 옮겨 갔다
+  strip.innerHTML = topics.length
+    ? topics
+        .slice(0, 6)
+        .map(
+          (t) => `<a class="card topic-pill" href="#/topics/${esc(t.id)}">
+            <b>${t.emoji} ${esc(t.name)}</b><small>핵심단어 ${t.words.length} · 문장 ${t.sentences.length}</small></a>`,
+        )
+        .join('') + `<a class="card topic-pill more" href="#/topics"><b>＋</b><small>주제 모두 보기</small></a>`
+    : `<div class="card topic-pill empty"><b>아직 모은 주제가 없어요</b>
+        <small>${lessonCount ? '이야기를 더 열면 주제별 단어가 모여요' : '이야기를 하나 열면 주제별 핵심단어를 자동으로 뽑아 줘요'}</small></div>`;
+}
+
+/** 주제 목록 화면 */
+async function renderTopics(id, tab) {
+  if (id) return renderTopic(id, tab);
+  const token = routeToken;
+  $view.innerHTML = `
+    <div class="eyebrow">Topics</div>
+    <h1 class="display">주제별 핵심단어</h1>
+    <p class="muted" style="font-size:13.5px;margin:6px 0 0">저장해 둔 이야기에서 주제를 찾아, 주제마다 핵심단어 ${TOPIC_WORDS}개와
+      그 단어가 나오는 문장을 모았어요. 단어 · 문장 · 퀴즈로 이어서 공부하세요.</p>
+    <div id="topicList" style="margin-top:18px">${'<div class="skeleton"></div>'.repeat(4)}</div>`;
+  const { topics, lessonCount } = await loadTopics();
+  if (token !== routeToken) return;
+  const el = document.getElementById('topicList');
+  if (!el) return;
+  if (!topics.length) {
+    el.innerHTML = `<div class="empty">${icon.book}
+      <div>${lessonCount ? '주제로 묶을 만한 문장을 아직 찾지 못했어요' : '먼저 이야기를 열어 학습 자료를 만들어 주세요'}</div>
+      <a class="btn" href="#/" style="margin-top:12px">이야기 목록으로</a></div>`;
+    return;
+  }
+  el.innerHTML = `<div class="stories">${topics
+    .map((t) => {
+      const p = progress[topicKey(t.id)];
+      const pct = p?.total ? Math.round((p.learned.length / p.total) * 100) : 0;
+      const cls = pct >= 100 ? 'done' : pct > 0 ? 'started' : '';
+      return `<a class="card story topic ${cls}" href="#/topics/${esc(t.id)}">
+        <div class="num">${t.emoji}</div>
+        <div>
+          <div class="t">${esc(t.name)}</div>
+          <div class="ko">${esc(t.words.slice(0, 5).map((w) => w.word).join(' · '))}</div>
+          <div class="meta">
+            <span class="chip accent">핵심단어 ${t.words.length}</span>
+            <span class="chip">문장 ${t.sentences.length}</span>
+            ${pct ? `<span class="chip ${pct >= 100 ? 'good' : 'accent'}">${pct >= 100 ? '완료' : `${p.learned.length}/${p.total}문장`}</span><div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+          </div>
+        </div>
+      </a>`;
+    })
+    .join('')}</div>`;
+}
+
+/** 주제 학습 화면: 핵심단어 20개 · 관련 문장 · 퀴즈 */
+async function renderTopic(id, tab) {
+  const token = routeToken;
+  $view.innerHTML = `
+    <div class="topbar"><a class="icon-btn" href="#/topics" aria-label="주제 목록으로">${icon.back}</a><div class="title">주제별 학습</div></div>
+    <div class="card loading"><div class="book">${icon.book}</div><b>주제별 핵심단어를 모으고 있어요</b>
+      <div class="muted" style="font-size:13px">저장해 둔 이야기에서 단어와 문장을 고르는 중…</div></div>`;
+  const { topics } = await loadTopics();
+  if (token !== routeToken) return;
+  const topic = topics.find((t) => t.id === id);
+  if (!topic) {
+    toast('아직 모으지 못한 주제예요');
+    location.hash = '#/topics';
+    return;
+  }
+
+  // 레슨과 같은 모양으로 만들어 단어·문장·퀴즈 학습을 그대로 쓴다
+  const lesson = {
+    videoId: topicKey(topic.id),
+    title: `${topic.emoji} ${topic.name}`,
+    titleKo: '',
+    sentences: topic.sentences,
+    vocab: topic.words,
+    expressions: [],
+  };
+  const p = (progress[lesson.videoId] ||= { learned: [], total: 0 });
+  // 이야기가 늘면 모아 온 문장도 달라지므로, 문장 묶음이 바뀌면 익힘 표시를 비운다 (엉뚱한 문장에 붙지 않게)
+  const sig = `${lesson.sentences.length}:${lesson.sentences[0]?.en.slice(0, 40) || ''}:${lesson.sentences.at(-1)?.en.slice(0, 40) || ''}`;
+  if (p.sig && p.sig !== sig) p.learned = [];
+  Object.assign(p, { title: topic.name, titleKo: '', total: lesson.sentences.length, topic: true, sig });
+  saveProgress();
+  markStudied();
+
+  const stories = new Set(topic.sentences.map((s) => s.videoId)).size;
+  const needKo = topic.words.filter((w) => !w.ko).length;
+  tab = tab || p.lastTab || 'vocab';
+  $view.innerHTML = `
+    <div class="topbar"><a class="icon-btn" href="#/topics" aria-label="주제 목록으로">${icon.back}</a><div class="title">${esc(topic.name)}</div></div>
+    <div class="lesson-head">
+      <div class="eyebrow">주제별 핵심단어 · 이야기 ${stories}편에서</div>
+      <h1>${topic.emoji} ${esc(topic.name)}</h1>
+      <p>핵심단어 ${topic.words.length}개 · 관련 문장 ${topic.sentences.length}개</p>
+      ${needKo ? `<div class="card" id="meanCard" style="margin-top:12px;padding:12px 14px;font-size:13px">단어 ${needKo}개의 뜻을 받아오는 중…</div>` : ''}
+    </div>
+    <div class="tabs" role="tablist" style="grid-template-columns:repeat(3,1fr)">
+      ${[
+        ['vocab', '핵심단어'],
+        ['sentences', '문장'],
+        ['quiz', '퀴즈'],
+      ]
+        .map(([k, l]) => `<button role="tab" data-tab="${k}" class="${k === tab ? 'on' : ''}" aria-selected="${k === tab}">${l}</button>`)
+        .join('')}
+    </div>
+    <section id="pane"></section>`;
+
+  let firstPane = true;
+  const showTab = (k) => {
+    player.stop(true);
+    tts.stop();
+    p.lastTab = k;
+    saveProgress();
+    document.querySelectorAll('.tabs button').forEach((b) => {
+      b.classList.toggle('on', b.dataset.tab === k);
+      b.setAttribute('aria-selected', b.dataset.tab === k);
+    });
+    const pane = document.getElementById('pane');
+    if (k === 'sentences') paneSentences(pane, lesson, p, firstPane);
+    else if (k === 'quiz') paneQuiz(pane, lesson, p);
+    else paneVocab(pane, lesson);
+    firstPane = false;
+  };
+  document.querySelector('.tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-tab]');
+    if (b) showTab(b.dataset.tab);
+  });
+  showTab(tab);
+
+  // 이야기 단어장에 없던 단어의 뜻은 뒤에서 받아 채운다
+  if (needKo)
+    fillTopicMeanings(topic)
+      .then((n) => {
+        if (token !== routeToken) return;
+        const card = document.getElementById('meanCard');
+        if (n < needKo && card) card.textContent = `단어 ${needKo - n}개는 뜻을 받지 못했어요. 잠시 뒤 다시 열어 보세요.`;
+        else card?.remove();
+        if (n && document.querySelector('.tabs button.on')?.dataset.tab === 'vocab') paneVocab(document.getElementById('pane'), lesson);
+      })
+      .catch((err) => {
+        const card = document.getElementById('meanCard');
+        if (card) card.textContent = `단어 뜻을 받지 못했어요 (${err.message})`;
+      });
+}
+
 /* ───────────── 내 단어장 ───────────── */
 function renderWords(review) {
   const list = wordList().sort((a, b) => b.addedAt - a.addedAt);
@@ -1448,6 +1663,7 @@ function renderSettings() {
       () => stop,
     );
     lessons.clear();
+    resetTopics();
     toast(res.failed ? `${res.done - res.failed}편 바꿨어요 · ${res.failed}편 실패` : `${res.done}편을 LLM 해석으로 바꿨어요`);
     renderSettings();
   });
@@ -1484,6 +1700,7 @@ function renderSettings() {
     if (!confirm('저장된 학습 자료를 지울까요? (학습 기록·단어장은 남아요. 다시 열면 새로 만들어요)')) return;
     for (const k of await db.keys()) if (String(k).startsWith('lesson:')) await db.del(k);
     lessons.clear();
+    resetTopics();
     toast('학습 자료를 비웠어요');
     renderSettings();
   });
@@ -1560,7 +1777,7 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  if (page !== 'lesson') return;
+  if (page !== 'lesson' && page !== 'topics') return;
   // 퀴즈: 1~4로 보기 선택, Space로 다시 듣기
   const options = document.querySelectorAll('.options:not(.done) button');
   if (options.length) {

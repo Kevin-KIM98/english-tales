@@ -7,6 +7,7 @@ import { loadWordData, lemma, levelOf, rankOf, ipaOf } from '../public/lib/words
 import { findExpressions, findTraps } from '../public/lib/expressions.js';
 import { normalizeChannelInput } from '../public/lib/youtube.js';
 import { resumeIndex } from '../public/lib/study.js';
+import { analyzeTopics, wordsOf, TOPIC_WORDS } from '../public/lib/topics.js';
 import { ipaOf as arpabetToIpa } from '../scripts/ipa.mjs';
 import { alignSegments, translateMany, fillMissing, missingCount, setPacing } from '../public/lib/enrich.js';
 import { setTransport } from '../public/lib/net.js';
@@ -220,6 +221,82 @@ test('이어보기: 마지막 익힘 다음 문장부터', () => {
   assert.equal(resumeIndex(5, [4]), 0); // 마지막만 익혔으면 아직 안 익힌 첫 문장
   assert.equal(resumeIndex(5, [0, 4]), 1);
   assert.equal(resumeIndex(3, new Set([0])), 1); // Set 으로 넘겨도 된다
+});
+
+/* ── 주제별 핵심단어 ── */
+const topicStory = (lines, extra = {}) => ({
+  videoId: 'vid1',
+  title: '가족 이야기',
+  sentences: lines.map((en, i) => ({ i, en, ko: `해석 ${i}` })),
+  ...extra,
+});
+
+test('주제별 핵심단어: 문장을 주제로 나누고 단어·예문을 모은다', () => {
+  const lesson = topicStory(
+    [
+      'My sister called our mother from the hospital.',
+      'Her husband lost his job and could not pay the mortgage.',
+      'The lawyer said the inheritance would be split between us.',
+      'My brother was furious at the whole family.',
+      'I could not afford another loan on top of the rent.',
+    ],
+    { vocab: [{ word: 'inheritance', ko: '유산', level: 'C1' }] },
+  );
+  const topics = analyzeTopics([lesson]);
+  const family = topics.find((t) => t.id === 'family');
+  const money = topics.find((t) => t.id === 'money');
+  assert.ok(family && money);
+  assert.ok(family.words.some((w) => w.word === 'sister'));
+  assert.ok(money.words.some((w) => w.word === 'mortgage'));
+  // 뜻은 이야기 단어장에서 가져온다 (없으면 빈 채로 두고 앱이 나중에 채운다)
+  assert.equal(money.words.find((w) => w.word === 'inheritance')?.ko, '유산');
+  // 단어마다 그 단어가 실제로 나오는 문장을 예문으로 붙인다
+  for (const t of topics)
+    for (const w of t.words) {
+      assert.equal(w.example, t.sentences[w.i].en, `${t.id}/${w.word} 예문 번호`);
+      assert.ok(wordsOf(w.example).includes(w.word), `${t.id}/${w.word} 예문에 단어가 있어야 한다`);
+    }
+  // 문장에는 해석과 어느 이야기에서 왔는지가 함께 담긴다
+  assert.ok(family.sentences.every((s) => s.ko && s.videoId === 'vid1' && s.title === '가족 이야기'));
+  assert.deepEqual(
+    family.sentences.map((s) => s.i),
+    family.sentences.map((_, i) => i),
+  );
+});
+
+test('주제별 핵심단어: 개수를 넘지 않고, 주제 밖 문장은 넣지 않는다', () => {
+  const money = Array.from({ length: 40 }, (_, k) => `The bank charged a fee of ${k} dollars on the loan and the mortgage.`);
+  const off = ['A dragon flew over the silent mountain.'];
+  const topics = analyzeTopics([topicStory([...money, ...off])]);
+  const t = topics.find((x) => x.id === 'money');
+  assert.ok(t.words.length <= TOPIC_WORDS);
+  assert.equal(analyzeTopics([topicStory([...money, ...off])], { maxWords: 3 }).find((x) => x.id === 'money').words.length, 3);
+  assert.ok(!t.sentences.some((s) => s.en.includes('dragon')));
+  assert.ok(t.sentences.length <= 60);
+});
+
+test('주제별 핵심단어: 여러 이야기를 한데 모은다', () => {
+  const a = { videoId: 'a', title: '이야기 A', sentences: [{ i: 0, en: 'The teacher gave the student a scholarship.', ko: '가' }] };
+  const b = { videoId: 'b', title: '이야기 B', sentences: [{ i: 0, en: 'Tuition for the semester was due at the college.', ko: '나' }] };
+  const school = analyzeTopics([a, b]).find((t) => t.id === 'school');
+  assert.equal(new Set(school.sentences.map((s) => s.videoId)).size, 2);
+  assert.ok(school.words.some((w) => w.word === 'tuition'));
+  assert.equal(analyzeTopics([]).length, 0); // 저장된 이야기가 없으면 주제도 없다
+});
+
+test('주제별 핵심단어: 이름·너무 쉬운 단어는 빼고 사전형으로 모은다', () => {
+  const topics = analyzeTopics([
+    topicStory([
+      'Sarah told her mother about the wedding in Boston.',
+      'Her mothers were waiting because the families had already arrived.',
+    ]),
+  ]);
+  const family = topics.find((t) => t.id === 'family');
+  const list = family.words.map((w) => w.word);
+  assert.ok(!list.includes('sarah') && !list.includes('boston')); // 이름·지명 제외
+  assert.ok(!list.includes('because')); // 너무 쉬운 단어 제외
+  assert.ok(list.includes('mother') && !list.includes('mothers')); // 활용형은 사전형으로 합친다
+  assert.equal(family.words.find((w) => w.word === 'mother').count, 2);
 });
 
 /* ── 해석 엔진 (LLM) ── */
