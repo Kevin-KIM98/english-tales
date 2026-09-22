@@ -1,6 +1,8 @@
 // 스토리별 핵심단어: 이야기 한 편에서 '어려운' 단어 20개를 고르고, 단어마다 그 단어가 나오는 문장 하나를 붙인다.
+// 고르는 순서: ① 가장 어려운 단어부터 줄 세워 후보를 넉넉히(2배) 모으고 → ② 이야기 핵심에 가까운 순으로 다시 세워 20개를 뽑는다.
 // 서버·인터넷 없이 앱 안 데이터(구어 빈도·발음기호)로만 계산한다 (순수 계산 → 테스트 가능).
 import { COMMON_WORDS } from './common-words.js';
+import { isLoanword } from './loanwords.js';
 import { lemma, rankOf, ipaOf, levelOf } from './words.js';
 
 /** 이야기 한 편에서 뽑는 핵심단어(= 붙는 문장) 개수 */
@@ -11,7 +13,7 @@ const SKIP = new Set(
   `subscribe subscriber comment channel notification video playlist episode share
    gonna wanna gotta kinda sorta dunno lemme gimme yeah yep nope okay hmm huh ugh whoa wow hey`.split(/\s+/),
 );
-const MIN_RANK = 1500; // 이보다 흔한 단어는 '어렵지 않다'고 본다
+const MIN_RANK = 2500; // 이보다 흔한 단어는 '어렵지 않다'고 본다
 const MAX_RANK = 45000; // 빈도 목록에 없는 말(오타·이름)은 뺀다
 const HARD_CAP = 20000; // 이보다 드문 단어는 더 어렵다고 쳐 주지 않는다 (희귀한 찌꺼기가 위로 오지 않게)
 
@@ -37,8 +39,27 @@ export function tokensOf(en) {
 /** 문장 속 학습 대상 단어 (사전형) */
 export const wordsOf = (en) => tokensOf(en).map((t) => t.word);
 
-// 점수: 어려울수록(빈도 순위가 낮을수록) 높게 + 이야기 속 반복 등장 + 이야기 단어장에 뽑힌 핵심어 가점
-const scoreOf = (c) => Math.log(Math.min(c.rank, HARD_CAP)) * 1.6 + Math.min(c.count, 5) * 0.7 + (c.core ? 1.5 : 0);
+const POOL = 2; // ① 단계에서 모으는 후보 = 뽑을 개수 × POOL
+
+/**
+ * 파생어는 뿌리 단어만큼만 어렵다고 본다 (lovingly ← love, darkness ← dark, hopeless ← hope).
+ * 드문 꼴이라도 아는 단어에 꼬리만 붙은 말은 공부할 거리가 적다.
+ */
+export function familiarRank(word) {
+  const rank = rankOf(word);
+  const roots = [];
+  const m = word.match(/^(.{3,}?)(ily|ly|ness|less|ful|fully)$/);
+  if (m) roots.push(m[2] === 'ily' ? m[1] + 'y' : m[1], m[1] + 'e');
+  let best = rank;
+  for (const r of roots) best = Math.min(best, rankOf(lemma(r)) * 4, rankOf(r) * 4);
+  return best;
+}
+
+// ① 어려운 정도: 드물수록 높게 (아주 드문 말은 HARD_CAP 에서 같게 보고 반복 등장으로 가른다)
+const hardOf = (c) => Math.log(Math.min(c.rank, HARD_CAP)) + Math.min(c.count, 5) * 0.05;
+// ② 이야기 핵심도: 이야기 단어장에 뽑힌 핵심어 · 제목에 나온 말 · 여러 문장에 반복 · 이야기 곳곳에 퍼져 나옴
+const coreOf = (c, total) =>
+  (c.core ? 3 : 0) + (c.title ? 3 : 0) + Math.log2(1 + c.count) * 1.5 + (total > 1 ? ((c.at.at(-1) - c.at[0]) / total) * 1.5 : 0);
 
 /** 예문으로 쓸 문장 고르기: 해석이 있는 것 → 아직 쓰지 않은 것 → 짧은 것 */
 function pickExample(cands, sentences, used) {
@@ -76,6 +97,8 @@ export function pickKeywords(lesson, opts = {}) {
   }
   for (const [w, v] of Object.entries(opts.meanings || {})) if (v?.ko && !known.has(w)) known.set(w, v);
 
+  const titleWords = new Set(wordsOf(String(lesson.title || '').toLowerCase()));
+
   // ① 단어 세기 (문장 첫 단어가 이름인지 가리려고 소문자로도 쓰인 단어를 모아 둔다)
   const toks = sentences.map((s) => tokensOf(s.en));
   const lower = new Set();
@@ -85,19 +108,29 @@ export function pickKeywords(lesson, opts = {}) {
   toks.forEach((list, k) => {
     for (const t of new Set(list.filter((t) => !t.head || lower.has(t.word)).map((t) => t.word))) {
       if (SKIP.has(t) || t.length < 4 || COMMON_WORDS.has(t)) continue;
-      const rank = rankOf(t);
-      if (rank < MIN_RANK || rank > MAX_RANK) continue;
+      if (rankOf(t) > MAX_RANK) continue;
+      const rank = familiarRank(t);
+      if (rank < MIN_RANK) continue;
       // 발음 사전(CMU)에 있는 진짜 단어만 — 자막 찌꺼기(wasnt · youve)나 오타는 여기서 걸러진다
-      if (!ipaOf(t)) continue;
-      const c = counts.get(t) || { word: t, count: 0, rank, core: core.has(t), at: [] };
+      const ipa = ipaOf(t);
+      if (!ipa) continue;
+      // 한국어에 외래어로 굳은 말(이메일·이젤·스누즈)은 이미 아는 말이라 뺀다
+      if (isLoanword(t, ipa, known.get(t)?.ko)) continue;
+      const c = counts.get(t) || { word: t, count: 0, rank, core: core.has(t), title: titleWords.has(t), at: [] };
       c.count++;
       c.at.push(k);
       counts.set(t, c);
     }
   });
 
-  // ② 어려운 순으로 고르고, 단어마다 예문을 하나씩 붙인다 (가능하면 서로 다른 문장으로)
-  const picked = [...counts.values()].sort((a, b) => scoreOf(b) - scoreOf(a)).slice(0, max);
+  // ② 가장 어려운 순으로 후보를 넉넉히 모으고 → ③ 이야기 핵심에 가까운 순으로 다시 세워 max 개를 뽑는다
+  const pool = [...counts.values()].sort((a, b) => hardOf(b) - hardOf(a)).slice(0, max * POOL);
+  const hardness = new Map(pool.map((c, k) => [c, k]));
+  const picked = pool
+    .sort((a, b) => coreOf(b, toks.length) - coreOf(a, toks.length) || hardness.get(a) - hardness.get(b))
+    .slice(0, max);
+
+  // ④ 단어마다 예문을 하나씩 붙인다 (가능하면 서로 다른 문장으로)
   const used = new Set();
   return picked.map((c) => {
     const k = pickExample(c.at, sentences, used);

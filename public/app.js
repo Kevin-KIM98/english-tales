@@ -4,6 +4,7 @@ import { getChannel, getMoreVideos } from './lib/youtube.js';
 import { buildLesson, getLesson, saveLesson, refillLesson, upgradeLesson, upgradeAllLessons, basicLessonIds, missingCount, jobOf, prefetch, onJobsChange } from './lib/lessons.js';
 import { define, translateMany } from './lib/enrich.js';
 import { pickKeywords, KEYWORD_COUNT } from './lib/keywords.js';
+import { isLoanword } from './lib/loanwords.js';
 import { loadWordData } from './lib/words.js';
 import { findTraps } from './lib/expressions.js';
 import { resumeIndex } from './lib/study.js';
@@ -1260,12 +1261,19 @@ async function fillKeywordGaps(videoId, items, title) {
   const needSent = items.filter((it) => !it.enKo);
   let gotWord = 0;
   let gotSent = 0;
+  let loans = 0;
 
   if (needWord.length) {
-    const ko = await translateMany(needWord.map((it) => it.word), () => {}, { word: true, title });
+    const ko = await translateMany(
+      needWord.map((it) => it.word),
+      () => {},
+      { word: true, title, context: needWord.map((it) => it.en) },
+    );
     const cache = (await db.get(MEANS_KEY)) || {};
     needWord.forEach((it, k) => {
       if (!ko[k]) return;
+      // 뜻이 소리 옮김뿐이면(스누즈·이젤) 외래어라 이미 아는 말 — 뜻은 기억해 두고 다음 뽑기에서 뺀다
+      if (isLoanword(it.word, it.ipa, ko[k])) loans++;
       it.ko = ko[k];
       cache[it.word] = { word: it.word, ko: ko[k], ipa: it.ipa, level: it.level };
       gotWord++;
@@ -1296,7 +1304,11 @@ async function fillKeywordGaps(videoId, items, title) {
       }
     }
   }
-  return { gotWord, gotSent, needWord: needWord.length, needSent: needSent.length };
+  if (loans) {
+    keywordCache.delete(videoId); // 외래어를 뺀 목록으로 다시 뽑게
+    storyList = null;
+  }
+  return { gotWord, gotSent, loans, needWord: needWord.length, needSent: needSent.length };
 }
 
 /** '단어 뜻 3개 · 문장 해석 2개' 처럼 아직 비어 있는 곳을 알려 준다 */
@@ -1432,8 +1444,9 @@ async function renderStoryKeywords(videoId) {
   // 비어 있는 뜻·해석은 뒤에서 받아 채운다
   if (gaps.word || gaps.sent)
     fillKeywordGaps(videoId, items, title)
-      .then(({ gotWord, gotSent }) => {
+      .then(({ gotWord, gotSent, loans }) => {
         if (token !== routeToken) return;
+        if (loans) return renderStoryKeywords(videoId); // 외래어가 빠진 자리를 다른 단어로 채워 다시 그린다
         const left = gaps.word - gotWord + (gaps.sent - gotSent);
         const card = document.getElementById('gapCard');
         if (left && card) card.textContent = `${gapText(gaps.word - gotWord, gaps.sent - gotSent)}는 아직 받지 못했어요. 잠시 뒤 다시 열어 보세요.`;
