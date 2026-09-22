@@ -111,6 +111,7 @@ public/            앱 화면 (Capacitor 웹 자산)
   lib/enrich.js    해석·단어·표현 생성
   lib/lessons.js   학습 자료 생성 작업·새 영상 미리 준비
   lib/keywords.js  스토리별 핵심단어·예문 뽑기 (오프라인 계산)
+  lib/loanwords.js 외래어(이메일·이젤 등) 판별 — 핵심단어에서 이미 아는 말 빼기
   lib/words.js · expressions.js · sentences.js   오프라인 단어·표현·문장 처리
   lib/tts.js       안드로이드 TTS (개발 시 브라우저 음성)
   lib/update.js    GitHub Release 업데이트 확인

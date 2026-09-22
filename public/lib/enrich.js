@@ -247,7 +247,8 @@ function makeBatches(lines, idxs) {
  * 여러 줄을 번역한다. 실패한 줄은 빈 문자열로 두고 개수를 failed 에 담는다.
  * @param {string[]} lines
  * @param {(p:number)=>void} onProgress
- * @param {{ word?: boolean }} opts 단어 뜻을 받을 때는 word: true
+ * @param {{ word?: boolean, context?: string[] }} opts 단어 뜻을 받을 때는 word: true,
+ *   context 는 줄마다 그 단어가 쓰인 문장 (해석 엔진에만 문맥으로 함께 보낸다)
  */
 export async function translateMany(lines, onProgress = () => {}, opts = {}) {
   const src = lines.map((l) => String(l ?? '').replace(/\s*\n\s*/g, ' ').trim());
@@ -258,7 +259,7 @@ export async function translateMany(lines, onProgress = () => {}, opts = {}) {
   let byLlm = 0;
   if (engineReady()) {
     const ko = await llmTranslate(
-      todo.map((i) => src[i]),
+      todo.map((i) => (opts.context?.[i] ? `${src[i]} (${String(opts.context[i]).replace(/\s+/g, ' ').trim()})` : src[i])),
       opts,
       (p) => onProgress(p * 0.9),
     );

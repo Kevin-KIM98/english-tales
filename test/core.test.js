@@ -7,7 +7,8 @@ import { loadWordData, lemma, levelOf, rankOf, ipaOf } from '../public/lib/words
 import { findExpressions, findTraps } from '../public/lib/expressions.js';
 import { normalizeChannelInput } from '../public/lib/youtube.js';
 import { resumeIndex } from '../public/lib/study.js';
-import { pickKeywords, wordsOf, KEYWORD_COUNT } from '../public/lib/keywords.js';
+import { pickKeywords, wordsOf, familiarRank, KEYWORD_COUNT } from '../public/lib/keywords.js';
+import { isTransliteration } from '../public/lib/loanwords.js';
 import { ipaOf as arpabetToIpa } from '../scripts/ipa.mjs';
 import { alignSegments, translateMany, fillMissing, missingCount, setPacing } from '../public/lib/enrich.js';
 import { setTransport } from '../public/lib/net.js';
@@ -320,6 +321,49 @@ test('핵심단어: 축약형·발음 사전에 없는 찌꺼기는 뽑지 않�
   assert.equal(boosted[0], 'grievance');
 });
 
+test('핵심단어: 외래어(이메일·이젤·스누즈)와 쉬운 뿌리의 파생어(lovingly)는 뽑지 않는다', () => {
+  const lines = [
+    'Work emails answered in bed at eleven.',
+    'The easel was waiting by the window.',
+    'She stopped reaching for the snooze button.',
+    'Come to the bakery tonight.',
+    'It felt like a room that had been lovingly prepared.',
+    'The dragon guarded a ledger of every grievance.',
+  ];
+  const list = pickKeywords(story(lines)).map((it) => it.word);
+  for (const w of ['email', 'easel', 'snooze', 'bakery', 'lovingly']) assert.ok(!list.includes(w), `${w} 는 뽑지 않는다`);
+  assert.ok(list.includes('ledger') && list.includes('grievance'));
+  assert.ok(familiarRank('lovingly') < 2500 && familiarRank('grievance') > 2500);
+  // 목록에 없어도 알고 있는 뜻이 소리 옮김뿐이면 외래어로 보고 뺀다
+  assert.ok(list.includes('dragon'));
+  assert.ok(!pickKeywords(story(lines), { meanings: { dragon: { ko: '드래곤' } } }).some((it) => it.word === 'dragon'));
+  assert.ok(pickKeywords(story(lines), { meanings: { dragon: { ko: '용' } } }).some((it) => it.word === 'dragon'));
+});
+
+test('외래어 판별: 한국어 뜻이 영어 소리를 옮겨 적은 것뿐인가', () => {
+  assert.ok(isTransliteration(ipaOf('snooze'), '스누즈'));
+  assert.ok(isTransliteration(ipaOf('easel'), '이젤'));
+  assert.ok(isTransliteration(ipaOf('email'), '이메일'));
+  assert.ok(isTransliteration(ipaOf('computer'), '컴퓨터')); // 끝 r 이 빠진 표기
+  assert.ok(!isTransliteration(ipaOf('snooze'), '잠깐 더 자다'));
+  assert.ok(!isTransliteration(ipaOf('bakery'), '빵집'));
+  assert.ok(!isTransliteration(ipaOf('tuition'), '등록금'));
+  assert.ok(!isTransliteration(ipaOf('lovingly'), '사랑스럽게'));
+});
+
+test('핵심단어: 가장 어려운 후보를 모은 뒤 이야기 핵심(제목·반복·단어장) 순으로 다시 골라 뽑는다', () => {
+  const lines = [
+    'The lighthouse keeper opened the ledger.',
+    'Her grievance was written in the ledger.',
+    'He was a reluctant accountant, and the ledger was his.',
+    'Nobody read the ledger after the audit.',
+    'A mortgage and a semester tuition came due.',
+  ];
+  const items = pickKeywords(story(lines, { title: 'The Ledger' }), { maxWords: 3 });
+  assert.equal(items[0].word, 'ledger'); // 제목에 나오고 이야기 내내 반복되는 말이 먼저
+  assert.ok(items.every((it) => it.rank >= 2500)); // 너무 쉬운 말은 후보에 오르지 않는다
+});
+
 /* ── 해석 엔진 (LLM) ── */
 const isLlm = (url) => url.startsWith('https://generativelanguage.googleapis.com');
 const geminiReply = (items) => ({
@@ -428,4 +472,17 @@ test('해석 엔진: LLM 이 해낸 줄 수를 알려 준다 (엔진 표시 판�
   assert.equal(fallback.llm, 0);
   assert.equal(fallback.failed, 0);
   assert.equal(fallback[0], '번역(It is not loud.)');
+});
+
+test('해석 엔진: 단어 뜻을 받을 때 쓰인 문장을 문맥으로 함께 보낸다', async (t) => {
+  t.after(() => (setTransport(null), setEngine({})));
+  setEngine({ on: true, key: 'k' });
+  let asked = [];
+  setTransport(async (url, { body }) => {
+    asked = askedLines(body);
+    return geminiReply(asked.map(({ n }) => ({ n, ko: '잠깐 더 자다' })));
+  });
+  const out = await translateMany(['snooze'], () => {}, { word: true, context: ['She hit the snooze button.'] });
+  assert.equal(out[0], '잠깐 더 자다');
+  assert.equal(asked[0].line, 'snooze (She hit the snooze button.)');
 });
